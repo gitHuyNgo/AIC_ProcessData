@@ -1,0 +1,6 @@
+faster-whisper
+torch
+numpy
+tqdm
+hydra-core
+omegaconf
