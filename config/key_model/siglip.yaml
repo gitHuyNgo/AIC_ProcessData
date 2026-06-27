@@ -1,0 +1,10 @@
+# key_model/siglip.yaml
+# Google SigLIP WebLI — ViT-SO400M-14-SigLIP-384
+# Multilingual (tốt cho tiếng Việt), input 384×384
+model_type: clip
+model_arch: ViT-SO400M-14-SigLIP-384
+model_pretrained: webli
+jit: false
+batch_size: 64
+num_workers: 8
+normalization: true

@@ -1,0 +1,10 @@
+# key_model/blip.yaml
+# Salesforce BLIP — feature_extractor / base
+# Image encoder: ViT-B/16, dùng cho image-text retrieval
+model_type: blip
+model_arch: blip_feature_extractor
+model_pretrained: base              # hoặc "large" nếu VRAM đủ
+jit: false
+batch_size: 32
+num_workers: 4
+normalization: true

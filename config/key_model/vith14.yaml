@@ -1,0 +1,10 @@
+# key_model/vith14.yaml
+# Apple DFN-5B — ViT-H-14-378-quickgelu
+# Zero-shot ImageNet ~84.4%, input 378×378
+model_type: clip
+model_arch: ViT-H-14-378-quickgelu
+model_pretrained: dfn5b
+jit: false
+batch_size: 64
+num_workers: 8
+normalization: true

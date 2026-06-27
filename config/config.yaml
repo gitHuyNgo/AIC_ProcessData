@@ -1,0 +1,73 @@
+defaults:
+  - key_model: vith14
+  - _self_
+
+# =========================
+# Global
+# =========================
+filter_extension: ".mp4"
+videos_search_depth: 1
+overwrite_file_list: false
+
+# =========================
+# Encode full video frames  (clustering - nhẹ)
+# =========================
+full_model:
+  model_arch: ViT-B-32
+  model_pretrained: openai
+  jit: false
+  batch_size: 768
+  num_workers: 4
+
+# =========================
+# ASR (faster-whisper)
+# =========================
+asr:
+  model_size: large-v3
+  device: cuda
+  compute_type: float16
+  language: vi
+
+# =========================
+# Scene detection (TransNetV2)
+# =========================
+transnet:
+  batch_size: 200
+  threshold: 0.5
+  device: cuda
+
+# =========================
+# Clustering
+# =========================
+clean_frames_embedding: false
+
+# =========================
+# Save keyframes
+# =========================
+save_keyframe_num_threads: -1
+
+# =========================
+# Resize keyframes && videos  (deploy only, sau khi search)
+# =========================
+resize:
+  frame_height: 540
+  video_height: 480
+  video_bitrate: "1M"
+  num_threads: -1
+
+# =========================
+# OCR (PaddleOCR + VietOCR)
+# =========================
+
+ocr_num_threads: 4
+
+ocr:
+  use_gpu: true
+  det_db_thresh: 0.3 # Detection threshold (lower = more sensitive)
+  det_db_box_thresh: 0.5 # Box threshold
+  use_angle_cls: true # Enable angle classification
+  lang: "en" # PaddleOCR language (en works for Vietnamese too)
+
+  # VietOCR settings
+  vietocr_model: "vgg_transformer" # Options: vgg_transformer, vgg_seq2seq, resnet_transformer
+  beamsearch: true # Set true for better accuracy but slower
