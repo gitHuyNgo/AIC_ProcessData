@@ -1,0 +1,10 @@
+numpy
+torch
+open_clip_torch
+Pillow
+tqdm
+opencv-python
+av
+
+# Optional executable fallback for unsupported codecs such as AV1:
+# install ffmpeg/ffprobe and make them available in PATH.

@@ -1,0 +1,8 @@
+numpy
+tqdm
+opencv-python
+scenedetect
+av
+
+# Optional executable fallback for unsupported codecs such as AV1:
+# install ffmpeg/ffprobe and make them available in PATH.
