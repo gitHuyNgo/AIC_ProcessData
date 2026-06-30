@@ -115,16 +115,16 @@ python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_
 Run:
 
 ```bash
-rclone config
+
 ```
 
 Create a Google Drive remote. This guide uses:
 
 ```txt
-gdrive
+aic
 ```
 
-If you use another remote name, replace `gdrive` in the commands below.
+If you use another remote name, replace `aic` in the commands below.
 
 ## 6. Download Zip Data From Google Drive
 
@@ -136,20 +136,78 @@ Create a local folder for downloaded zip files:
 mkdir -p data/zip
 ```
 
-Download all zip files from the shared Drive folder by folder id:
+Check available disk space before downloading:
 
 ```bash
-rclone copy gdrive: data/zip \
+df -h
+du -sh data/zip 2>/dev/null || true
+```
+
+First, list the files inside the shared Google Drive path:
+
+```bash
+rclone lsf "aic:AIC_2026/videos" \
   --drive-shared-with-me \
-  --drive-root-folder-id 1hsybk0yYP8xpkwpNRDvOUK-0nRNtnM-K \
-  --include "*.zip" \
+  --files-only \
+  --max-depth 1
+```
+
+Do a dry run before downloading:
+
+```bash
+rclone copy "aic:AIC_2026/videos" data/zip \
+  --drive-shared-with-me \
+  --files-only \
+  --max-depth 1 \
+  --filter "+ /Videos_*.zip" \
+  --filter "- *" \
+  --dry-run \
   -P
 ```
 
-If the shared folder appears by name in rclone, this form may also work:
+If the dry run only shows the expected video zip files and the disk has enough free space, download them:
 
 ```bash
-rclone copy "gdrive:AIC_2026/videos" data/zip --drive-shared-with-me --include "*.zip" -P
+rclone copy "aic:AIC_2026/videos" data/zip \
+  --drive-shared-with-me \
+  --files-only \
+  --max-depth 1 \
+  --filter "+ /Videos_*.zip" \
+  --filter "- *" \
+  -P
+```
+
+If the instance does not have enough disk space for all zip files at once, download one zip file at a time:
+
+```bash
+rclone copy "aic:AIC_2026/videos" data/zip \
+  --drive-shared-with-me \
+  --files-only \
+  --max-depth 1 \
+  --filter "+ /Videos_K17.zip" \
+  --filter "- *" \
+  -P
+```
+
+If a download fails with `no space left on device`, remove failed partial files before retrying:
+
+```bash
+find data/zip -type f -name "*.partial" -print
+find data/zip -type f -name "*.partial" -delete
+```
+
+Expected files:
+
+```txt
+Videos_K16.zip
+Videos_K17.zip
+Videos_K18.zip
+Videos_K19.zip
+Videos_K20.zip
+Videos_L25_a1.zip
+Videos_L28_a.zip
+Videos_L29_a.zip
+Videos_L30_a.zip
 ```
 
 Check downloaded files:
@@ -190,6 +248,16 @@ for zip_file in data/zip/*.zip; do
   mkdir -p "dataraw/videos/Video/$folder_name"
   unzip -q "$zip_file" -d "dataraw/videos/Video/$folder_name"
 done
+```
+
+If disk space is limited, extract one zip file and then remove that zip file:
+
+```bash
+zip_file="data/zip/Videos_K17.zip"
+folder_name=$(basename "$zip_file" .zip)
+mkdir -p "dataraw/videos/Video/$folder_name"
+unzip -q "$zip_file" -d "dataraw/videos/Video/$folder_name"
+rm "$zip_file"
 ```
 
 Check extracted videos:
@@ -300,13 +368,13 @@ ls -lh data/output
 Upload the output zip folder:
 
 ```bash
-rclone copy data/output "gdrive:AIC_2026/outputs" -P
+rclone copy data/output "aic:AIC_2026/outputs" -P
 ```
 
 If you need to upload to a shared Drive folder by folder id:
 
 ```bash
-rclone copy data/output gdrive: \
+rclone copy data/output aic: \
   --drive-shared-with-me \
   --drive-root-folder-id YOUR_OUTPUT_FOLDER_ID \
   -P
@@ -315,7 +383,7 @@ rclone copy data/output gdrive: \
 Verify uploaded files:
 
 ```bash
-rclone ls "gdrive:AIC_2026/outputs"
+rclone ls "aic:AIC_2026/outputs"
 ```
 
 ## 13. Notes
