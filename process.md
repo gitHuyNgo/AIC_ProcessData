@@ -1,24 +1,77 @@
-# AIC_ProcessData Process
+# AIC_ProcessData Full Pipeline
 
-This document describes how to download zipped video data from Google Drive, extract the `.mp4` files, and run the full processing pipeline.
+This guide describes the full workflow for running the project on VastAI:
 
-## 1. Install System Tools
+1. Clone the repository.
+2. Install system tools and Python dependencies.
+3. Download zipped `.mp4` data from Google Drive.
+4. Extract videos into the expected input folder.
+5. Run the processing pipeline.
+6. Zip all outputs.
+7. Upload the final zip files back to Google Drive.
+
+## 1. Start A VastAI Instance
+
+Use a CUDA image with Python and PyTorch if possible.
+
+After connecting to the instance, check the GPU:
+
+```bash
+nvidia-smi
+```
+
+Start a `tmux` session so the job keeps running if your SSH connection drops:
+
+```bash
+tmux new -s aic
+```
+
+To detach from tmux:
+
+```bash
+Ctrl+b
+d
+```
+
+To reconnect later:
+
+```bash
+tmux attach -t aic
+```
+
+## 2. Clone The Repository
+
+Clone the project:
+
+```bash
+git clone <YOUR_REPO_URL>
+cd AIC_ProcessData
+```
+
+If the repository is already cloned, update it:
+
+```bash
+cd AIC_ProcessData
+git pull
+```
+
+## 3. Install System Tools
 
 On Ubuntu/Linux:
 
 ```bash
 sudo apt update
-sudo apt install ffmpeg unzip zip tmux curl -y
+sudo apt install git ffmpeg unzip zip tmux curl -y
 ```
 
-Install `rclone` for Google Drive downloads:
+Install `rclone` for Google Drive download/upload:
 
 ```bash
 sudo -v
 curl https://rclone.org/install.sh | sudo bash
 ```
 
-Check that the required tools are available:
+Check the tools:
 
 ```bash
 ffmpeg -version
@@ -26,7 +79,38 @@ ffprobe -version
 rclone version
 ```
 
-## 2. Configure Google Drive Access
+## 4. Create Python Environment
+
+If Conda is available:
+
+```bash
+conda create -n aic_process python=3.10 -y
+conda activate aic_process
+```
+
+If Conda is not available, use `venv`:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+```
+
+Install project dependencies:
+
+```bash
+pip install -r src/requirements/requirements_encode_video.txt
+pip install -r src/requirements/requirements_scene_boundary.txt
+pip install -r src/requirements/requirements_save_keyframes.txt
+```
+
+Verify CUDA from Python:
+
+```bash
+python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+```
+
+## 5. Configure Google Drive With Rclone
 
 Run:
 
@@ -34,54 +118,65 @@ Run:
 rclone config
 ```
 
-Create a Google Drive remote. In the examples below, the remote name is:
+Create a Google Drive remote. This guide uses:
 
 ```txt
 gdrive
 ```
 
-If you choose another remote name, replace `gdrive` in the commands below.
+If you use another remote name, replace `gdrive` in the commands below.
 
-## 3. Download Zip Files From Google Drive
+## 6. Download Zip Data From Google Drive
 
-Your data is stored on Google Drive as multiple `.zip` files. Each zip file contains many `.mp4` videos.
+Your input data is on Google Drive as `.zip` files. Each zip file contains many `.mp4` videos.
 
-Create a local folder for the zip files:
+Create a local folder for downloaded zip files:
 
 ```bash
 mkdir -p data/zip
 ```
 
-If the shared folder appears in rclone as `AIC_2026/videos`, download all zip files with:
+Download all zip files from the shared Drive folder by folder id:
+
+```bash
+rclone copy gdrive: data/zip \
+  --drive-shared-with-me \
+  --drive-root-folder-id 1hsybk0yYP8xpkwpNRDvOUK-0nRNtnM-K \
+  --include "*.zip" \
+  -P
+```
+
+If the shared folder appears by name in rclone, this form may also work:
 
 ```bash
 rclone copy "gdrive:AIC_2026/videos" data/zip --drive-shared-with-me --include "*.zip" -P
 ```
 
-If rclone cannot find the shared folder by name, use the Google Drive folder id from the shared link:
+Check downloaded files:
 
 ```bash
-rclone copy gdrive: data/zip --drive-shared-with-me --drive-root-folder-id 1hsybk0yYP8xpkwpNRDvOUK-0nRNtnM-K --include "*.zip" -P
+ls -lh data/zip
 ```
 
-Expected local files:
+Expected files:
 
 ```txt
 data/zip/Videos_K16.zip
 data/zip/Videos_K17.zip
 data/zip/Videos_K18.zip
+data/zip/Videos_K19.zip
 ...
 ```
 
-## 4. Extract Zip Files
+## 7. Extract Videos
 
-The pipeline reads `.mp4` files from:
+The pipeline reads input videos from:
 
 ```txt
 dataraw/videos/Video/
 ```
 
-Create that folder:
+Create the input folder:
 
 ```bash
 mkdir -p dataraw/videos/Video
@@ -97,7 +192,14 @@ for zip_file in data/zip/*.zip; do
 done
 ```
 
-After extraction, the layout should look like:
+Check extracted videos:
+
+```bash
+find dataraw/videos/Video -type f -name "*.mp4" | head
+find dataraw/videos/Video -type f -name "*.mp4" | wc -l
+```
+
+Example layout:
 
 ```txt
 dataraw/videos/Video/Videos_K16/*.mp4
@@ -105,51 +207,36 @@ dataraw/videos/Video/Videos_K17/*.mp4
 dataraw/videos/Video/Videos_K18/*.mp4
 ```
 
-The pipeline scans `.mp4` files recursively, so it is fine if the zip files contain nested folders.
+The pipeline scans `.mp4` files recursively, so nested folders inside the zip files are allowed.
 
-## 5. Create Python Environment
+## 8. Test The Pipeline
 
-Create and activate a Conda environment:
-
-```bash
-conda create -n aic_process python=3.10 -y
-conda activate aic_process
-```
-
-Install Python dependencies:
-
-```bash
-pip install -r src/requirements/requirements_encode_video.txt
-pip install -r src/requirements/requirements_scene_boundary.txt
-pip install -r src/requirements/requirements_save_keyframes.txt
-```
-
-## 6. Run The Full Pipeline
-
-Run all steps in order:
-
-```bash
-python src/pipeline.py --device cuda
-```
-
-The pipeline executes:
-
-1. `encode_video`: creates frame embeddings.
-2. `scene_boundary`: detects scene boundaries.
-3. `clustering`: selects keyframe indices.
-4. `save_keyframes`: saves keyframe images and mapping files.
-
-To test with only a few videos:
+Before running everything, test on two videos:
 
 ```bash
 python src/pipeline.py --device cuda --limit-videos 2
 ```
 
-To use CPU:
+If CUDA is not available, use CPU:
 
 ```bash
-python src/pipeline.py --device cpu
+python src/pipeline.py --device cpu --limit-videos 2
 ```
+
+## 9. Run The Full Pipeline
+
+Run all videos:
+
+```bash
+python src/pipeline.py --device cuda
+```
+
+The pipeline runs these steps in order:
+
+1. `encode_video`: creates frame embeddings.
+2. `scene_boundary`: detects scene boundaries.
+3. `clustering`: selects keyframe indices.
+4. `save_keyframes`: saves keyframe images and mapping files.
 
 To rerun and overwrite existing outputs:
 
@@ -157,7 +244,7 @@ To rerun and overwrite existing outputs:
 python src/pipeline.py --device cuda --overwrite
 ```
 
-## 7. Output Structure
+## 10. Output Structure
 
 After the pipeline finishes, outputs are saved to:
 
@@ -169,7 +256,16 @@ ProcessedData/data/keyframes/...               # keyframe .webp files
 ProcessedData/data/map_keyframes/...           # keyframe mapping .csv files
 ```
 
-## 8. Zip And Upload Outputs To Google Drive
+Quick output checks:
+
+```bash
+find dataraw/embeddings -type f -name "*.npy" | wc -l
+find ProcessedData/scence_boundary -type f -name "*.txt" | wc -l
+find ProcessedData/data/keyframes -type f -name "*.webp" | wc -l
+find ProcessedData/data/map_keyframes -type f -name "*.csv" | wc -l
+```
+
+## 11. Zip All Outputs
 
 Create a folder for final zip artifacts:
 
@@ -193,30 +289,41 @@ zip -r -s 4g data/output/AIC_ProcessData_outputs_split.zip \
   ProcessedData
 ```
 
-Upload the output zip back to Google Drive:
+Check the zip files:
+
+```bash
+ls -lh data/output
+```
+
+## 12. Upload Outputs Back To Google Drive
+
+Upload the output zip folder:
 
 ```bash
 rclone copy data/output "gdrive:AIC_2026/outputs" -P
 ```
 
-If you need to upload to a shared Google Drive folder by folder id, use:
+If you need to upload to a shared Drive folder by folder id:
 
 ```bash
-rclone copy data/output gdrive: --drive-shared-with-me --drive-root-folder-id YOUR_OUTPUT_FOLDER_ID -P
+rclone copy data/output gdrive: \
+  --drive-shared-with-me \
+  --drive-root-folder-id YOUR_OUTPUT_FOLDER_ID \
+  -P
 ```
 
-Verify that the files were uploaded:
+Verify uploaded files:
 
 ```bash
 rclone ls "gdrive:AIC_2026/outputs"
 ```
 
-## 9. Notes
+## 13. Notes
 
-- The input data starts as `.zip` files on Google Drive.
+- Input data starts as `.zip` files on Google Drive.
 - Each zip file can contain many `.mp4` videos.
 - The pipeline only processes `.mp4` files.
 - `sample_every` is fixed at `1` inside the pipeline so keyframe indices match the original video frame numbers.
-- If decoding fails for some codecs, confirm that `ffmpeg` and `ffprobe` are installed and available in `PATH`.
+- If video decoding fails, confirm that `ffmpeg` and `ffprobe` are installed and available in `PATH`.
 - If CUDA is unavailable, run with `--device cpu`.
 - The final output zip includes embeddings, scene boundaries, selected keyframe indices, keyframe images, and mapping files.
