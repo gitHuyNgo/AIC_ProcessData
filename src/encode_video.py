@@ -278,6 +278,25 @@ def ffmpeg_has_decoder(decoder_name: str) -> bool:
     return proc.returncode == 0 and decoder_name in proc.stdout
 
 
+def nvdec_decoder_for_codec(codec: str) -> str | None:
+    decoder_map = {
+        "av1": "av1_cuvid",
+        "h264": "h264_cuvid",
+        "hevc": "hevc_cuvid",
+        "mjpeg": "mjpeg_cuvid",
+        "mpeg1video": "mpeg1_cuvid",
+        "mpeg2video": "mpeg2_cuvid",
+        "mpeg4": "mpeg4_cuvid",
+        "vc1": "vc1_cuvid",
+        "vp8": "vp8_cuvid",
+        "vp9": "vp9_cuvid",
+    }
+    decoder = decoder_map.get(codec)
+    if decoder and ffmpeg_has_decoder(decoder):
+        return decoder
+    return None
+
+
 def encode_tensor_batch(model, batch: list[torch.Tensor], device: torch.device) -> np.ndarray:
     tensor = torch.stack(batch).to(device, non_blocking=True)
     if device.type == "cuda":
@@ -394,12 +413,13 @@ def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, 
         ),
     ]
     codec = str(stream.get("codec_name") or "").lower()
-    if use_nvdec and codec == "av1" and ffmpeg_has_decoder("av1_cuvid"):
+    nvdec_decoder = nvdec_decoder_for_codec(codec) if use_nvdec else None
+    if nvdec_decoder:
         input_args = [
             "-hwaccel",
             "cuda",
             "-c:v",
-            "av1_cuvid",
+            nvdec_decoder,
         ]
 
     cmd = [
@@ -495,21 +515,22 @@ def encode_video_pyav(video_path: Path, output_path: Path, model, preprocess, de
 
 def encode_video(video_path: Path, output_path: Path, model, preprocess, device: torch.device, batch_size: int, sample_every: int) -> None:
     codec = codec_name(video_path)
+    try:
+        print("Using FFmpeg fast decode path.", flush=True)
+        encode_video_ffmpeg(video_path, output_path, model,
+                            preprocess, device, batch_size, sample_every)
+        return
+    except Exception as ffmpeg_exc:
+        print(
+            f"FFmpeg fast decode failed for {video_path} (codec={codec or 'unknown'}): {ffmpeg_exc}", flush=True)
     if codec == "av1":
-        try:
-            print("Using FFmpeg/NVDEC for AV1 decode.", flush=True)
-            encode_video_ffmpeg(video_path, output_path, model,
-                                preprocess, device, batch_size, sample_every)
-            return
-        except Exception as ffmpeg_exc:
-            print(
-                f"FFmpeg/NVDEC decode failed for {video_path}: {ffmpeg_exc}", flush=True)
-            print("Retrying with PyAV CPU fallback for AV1.", flush=True)
-            encode_video_pyav(video_path, output_path, model,
-                              preprocess, device, batch_size, sample_every)
-            return
+        print("Retrying with PyAV CPU fallback for AV1.", flush=True)
+        encode_video_pyav(video_path, output_path, model,
+                          preprocess, device, batch_size, sample_every)
+        return
 
     try:
+        print("Retrying with OpenCV decode.", flush=True)
         encode_video_cv2(video_path, output_path, model,
                          preprocess, device, batch_size, sample_every)
     except Exception as exc:
