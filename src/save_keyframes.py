@@ -383,7 +383,7 @@ def extract_frames_ffmpeg_batch(video_path: Path, keyframe_indices: np.ndarray, 
         chunk = [int(idx) for idx in keyframe_indices[start: start + chunk_size]]
         if not chunk:
             continue
-        select_expr = "+".join(f"eq(n,{idx})" for idx in chunk)
+        select_expr = "+".join(f"eq(n\\,{idx})" for idx in chunk)
         with tempfile.TemporaryDirectory(prefix="aic_keyframes_", dir=output_path) as tmp_dir:
             tmp_path = Path(tmp_dir)
             cmd = [
@@ -396,11 +396,11 @@ def extract_frames_ffmpeg_batch(video_path: Path, keyframe_indices: np.ndarray, 
                 "-i",
                 str(video_path),
                 "-vf",
-                f"select='{select_expr}'",
+                f"select={select_expr}",
                 "-vsync",
                 "vfr",
                 "-compression_level",
-                "4",
+                "0",
                 "-quality",
                 str(int(webp_quality)),
                 str(tmp_path / "%06d.webp"),
