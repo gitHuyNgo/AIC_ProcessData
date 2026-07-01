@@ -266,6 +266,18 @@ def codec_name(video_path: Path) -> str:
     return str(probe_video(video_path).get("codec_name") or "").lower()
 
 
+def ffmpeg_has_decoder(decoder_name: str) -> bool:
+    if shutil.which("ffmpeg") is None:
+        return False
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-decoders"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode == 0 and decoder_name in proc.stdout
+
+
 def encode_tensor_batch(model, batch: list[torch.Tensor], device: torch.device) -> np.ndarray:
     tensor = torch.stack(batch).to(device, non_blocking=True)
     if device.type == "cuda":
@@ -321,7 +333,7 @@ def encode_video_cv2(video_path: Path, output_path: Path, model, preprocess, dev
     save_embedding_chunks(output_path, chunks)
 
 
-def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, device: torch.device, batch_size: int, sample_every: int) -> None:
+def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, device: torch.device, batch_size: int, sample_every: int, use_nvdec: bool = True) -> None:
     if shutil.which("ffmpeg") is None:
         raise RuntimeError(
             "FFmpeg executable not found. Install ffmpeg for AV1 fallback decoding.")
@@ -334,11 +346,17 @@ def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, 
     if width <= 0 or height <= 0:
         raise RuntimeError(f"Could not probe width/height for {video_path}")
 
+    input_args = []
+    codec = str(stream.get("codec_name") or "").lower()
+    if use_nvdec and codec == "av1" and ffmpeg_has_decoder("av1_cuvid"):
+        input_args = ["-hwaccel", "cuda", "-c:v", "av1_cuvid"]
+
     cmd = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "error",
+        *input_args,
         "-i",
         str(video_path),
         "-f",
@@ -357,8 +375,9 @@ def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, 
     batch: list[torch.Tensor] = []
     chunks: list[np.ndarray] = []
 
+    decode_label = "FFmpeg NVDEC" if input_args else "FFmpeg decode"
     pbar = tqdm(total=frame_count if frame_count > 0 else None,
-                desc=f"FFmpeg decode {video_path.name}", unit="frame")
+                desc=f"{decode_label} {video_path.name}", unit="frame")
     while True:
         raw = proc.stdout.read(frame_size)
         if not raw:
@@ -430,16 +449,16 @@ def encode_video(video_path: Path, output_path: Path, model, preprocess, device:
         print(
             f"Normal decode failed for {video_path} (codec={codec or 'unknown'}): {exc}", flush=True)
         try:
-            print("Retrying with PyAV fallback for AV1/unsupported codecs.", flush=True)
-            encode_video_pyav(video_path, output_path, model,
-                              preprocess, device, batch_size, sample_every)
+            print("Retrying with FFmpeg/NVDEC fallback for AV1/unsupported codecs.", flush=True)
+            encode_video_ffmpeg(video_path, output_path, model,
+                                preprocess, device, batch_size, sample_every)
             return
-        except Exception as pyav_exc:
+        except Exception as ffmpeg_exc:
             print(
-                f"PyAV decode fallback failed for {video_path}: {pyav_exc}", flush=True)
-        print("Retrying with FFmpeg raw-video fallback for AV1/unsupported codecs.", flush=True)
-        encode_video_ffmpeg(video_path, output_path, model,
-                            preprocess, device, batch_size, sample_every)
+                f"FFmpeg/NVDEC decode fallback failed for {video_path}: {ffmpeg_exc}", flush=True)
+        print("Retrying with PyAV CPU fallback for AV1/unsupported codecs.", flush=True)
+        encode_video_pyav(video_path, output_path, model,
+                          preprocess, device, batch_size, sample_every)
 
 
 def process_video(

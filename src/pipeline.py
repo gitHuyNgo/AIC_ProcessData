@@ -58,6 +58,15 @@ def find_mp4_files(video_root: Path) -> list[Path]:
     return sorted(path for path in video_root.rglob("*.mp4") if path.is_file())
 
 
+def require_file(path: Path, producer_step: str, skip_flag: str) -> None:
+    if path.exists():
+        return
+    raise FileNotFoundError(
+        f"Required file not found: {path}\n"
+        f"Run the {producer_step} step first, or remove {skip_flag}."
+    )
+
+
 def split_collection(relative_video_path: Path) -> tuple[str, Path]:
     parts = relative_video_path.parts
     if len(parts) <= 1:
@@ -127,8 +136,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 print(f"Scene boundary: {video_path.name} -> {paths['scene']}")
 
         if not args.skip_clustering:
-            wait_for_file(paths["embedding"])
-            wait_for_file(paths["scene"])
+            require_file(paths["embedding"], "encode_video", "--skip-encode")
+            require_file(paths["scene"], "scene_boundary", "--skip-scene-boundary")
             if args.overwrite or not paths["keyframe_indices"].exists():
                 select_keyframes(
                     paths["scene"],
@@ -140,7 +149,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 paths["embedding"].write_bytes(b"")
 
         if not args.skip_save_keyframes:
-            wait_for_file(paths["keyframe_indices"])
+            require_file(paths["keyframe_indices"], "clustering", "--skip-clustering")
             if args.overwrite or not paths["map"].exists():
                 save_frames(
                     paths["keyframe_indices"],
