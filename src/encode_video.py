@@ -346,10 +346,23 @@ def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, 
     if width <= 0 or height <= 0:
         raise RuntimeError(f"Could not probe width/height for {video_path}")
 
+    output_width, output_height = get_resized_imgsize(width, height, 224)
+    output_width = max(2, output_width // 2 * 2)
+    output_height = max(2, output_height // 2 * 2)
+
     input_args = []
+    output_args = ["-vf", f"scale={output_width}:{output_height}:flags=bicubic"]
     codec = str(stream.get("codec_name") or "").lower()
     if use_nvdec and codec == "av1" and ffmpeg_has_decoder("av1_cuvid"):
-        input_args = ["-hwaccel", "cuda", "-c:v", "av1_cuvid"]
+        input_args = [
+            "-hwaccel",
+            "cuda",
+            "-c:v",
+            "av1_cuvid",
+            "-resize",
+            f"{output_width}x{output_height}",
+        ]
+        output_args = []
 
     cmd = [
         "ffmpeg",
@@ -359,6 +372,7 @@ def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, 
         *input_args,
         "-i",
         str(video_path),
+        *output_args,
         "-f",
         "rawvideo",
         "-pix_fmt",
@@ -370,7 +384,7 @@ def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE)
     assert proc.stdout is not None
-    frame_size = width * height * 3
+    frame_size = output_width * output_height * 3
     frame_idx = -1
     batch: list[torch.Tensor] = []
     chunks: list[np.ndarray] = []
@@ -390,7 +404,8 @@ def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, 
         pbar.update(1)
         if sample_every > 1 and frame_idx % sample_every != 0:
             continue
-        frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
+        frame = np.frombuffer(raw, dtype=np.uint8).reshape(
+            (output_height, output_width, 3))
         batch.append(preprocess(Image.fromarray(frame)))
         if len(batch) >= batch_size:
             chunks.append(encode_tensor_batch(model, batch, device))
@@ -441,11 +456,25 @@ def encode_video_pyav(video_path: Path, output_path: Path, model, preprocess, de
 
 
 def encode_video(video_path: Path, output_path: Path, model, preprocess, device: torch.device, batch_size: int, sample_every: int) -> None:
+    codec = codec_name(video_path)
+    if codec == "av1":
+        try:
+            print("Using FFmpeg/NVDEC for AV1 decode.", flush=True)
+            encode_video_ffmpeg(video_path, output_path, model,
+                                preprocess, device, batch_size, sample_every)
+            return
+        except Exception as ffmpeg_exc:
+            print(
+                f"FFmpeg/NVDEC decode failed for {video_path}: {ffmpeg_exc}", flush=True)
+            print("Retrying with PyAV CPU fallback for AV1.", flush=True)
+            encode_video_pyav(video_path, output_path, model,
+                              preprocess, device, batch_size, sample_every)
+            return
+
     try:
         encode_video_cv2(video_path, output_path, model,
                          preprocess, device, batch_size, sample_every)
     except Exception as exc:
-        codec = codec_name(video_path)
         print(
             f"Normal decode failed for {video_path} (codec={codec or 'unknown'}): {exc}", flush=True)
         try:
