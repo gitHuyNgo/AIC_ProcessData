@@ -124,7 +124,7 @@ def probe_video(video_path: Path) -> dict:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=codec_name,nb_frames,avg_frame_rate,r_frame_rate",
+        "stream=codec_name,width,height,nb_frames,avg_frame_rate,r_frame_rate",
         "-of",
         "json",
         str(video_path),
@@ -150,6 +150,8 @@ def probe_video_pyav(video_path: Path) -> dict:
             stream = next(s for s in container.streams if s.type == "video")
             return {
                 "codec_name": stream.codec_context.name,
+                "width": stream.codec_context.width,
+                "height": stream.codec_context.height,
                 "nb_frames": str(stream.frames or 0),
                 "avg_frame_rate": str(stream.average_rate) if stream.average_rate else None,
             }
@@ -184,19 +186,20 @@ def ffmpeg_has_decoder(decoder_name: str) -> bool:
 
 
 def video_fps(video_path: Path) -> float:
-    try:
-        import cv2
-
-        cap = cv2.VideoCapture(str(video_path))
-        if cap.isOpened():
-            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-            cap.release()
-            if fps > 0:
-                return fps
-        cap.release()
-    except Exception:
-        pass
     stream = probe_video(video_path)
+    if str(stream.get("codec_name") or "").lower() != "av1":
+        try:
+            import cv2
+
+            cap = cv2.VideoCapture(str(video_path))
+            if cap.isOpened():
+                fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+                cap.release()
+                if fps > 0:
+                    return fps
+            cap.release()
+        except Exception:
+            pass
     return parse_frame_rate(stream.get("avg_frame_rate") or stream.get("r_frame_rate"))
 
 
@@ -472,20 +475,101 @@ def save_frames_cv2(keyframe_indices: np.ndarray, video_path: Path, output_path:
         raise RuntimeError(f"Cannot open video file: {video_path}")
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     frames_mapping = []
-    for key_frame_idx, frame_idx in enumerate(keyframe_indices):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
-        ret, frame = cap.read()
-        if not ret:
-            file_path = output_path / f"{key_frame_idx:06d}.webp"
-            extract_frame_fallback(video_path, int(frame_idx), file_path)
-            frames_mapping.append(
-                (key_frame_idx, frame_idx / fps if fps > 0 else "", fps, int(frame_idx)))
-            continue
+    current_index = -1
+    for key_frame_idx, frame_idx in tqdm(
+        list(enumerate(keyframe_indices)),
+        desc=f"Saving keyframes {video_path.name}",
+        unit="frame",
+        leave=False,
+    ):
+        frame_idx = int(frame_idx)
+        while current_index < frame_idx:
+            ret, frame = cap.read()
+            if not ret:
+                cap.release()
+                raise RuntimeError(f"Cannot read frame {frame_idx} from {video_path}")
+            current_index += 1
         file_path = output_path / f"{key_frame_idx:06d}.webp"
         if cv2.imwrite(str(file_path), frame, [cv2.IMWRITE_WEBP_QUALITY, int(webp_quality)]):
             frames_mapping.append(
-                (key_frame_idx, frame_idx / fps if fps > 0 else "", fps, int(frame_idx)))
+                (key_frame_idx, current_index / fps if fps > 0 else "", fps, current_index))
     cap.release()
+    return frames_mapping
+
+
+def save_frames_ffmpeg_stream(keyframe_indices: np.ndarray, video_path: Path, output_path: Path, webp_quality: int) -> list[tuple]:
+    import cv2
+
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("FFmpeg executable not found for AV1 keyframe extraction.")
+    stream = probe_video(video_path)
+    width = int(stream.get("width") or 0)
+    height = int(stream.get("height") or 0)
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"Could not probe width/height for {video_path}")
+
+    input_args = []
+    if codec_name(video_path) == "av1" and ffmpeg_has_decoder("av1_cuvid"):
+        input_args = ["-hwaccel", "cuda", "-c:v", "av1_cuvid"]
+
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        *input_args,
+        "-i",
+        str(video_path),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr24",
+        "-vsync",
+        "0",
+        "-",
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdout is not None
+
+    fps = video_fps(video_path)
+    frame_size = width * height * 3
+    keyframe_indices = np.sort(np.atleast_1d(keyframe_indices).astype(np.int64))
+    target_pos = 0
+    frames_mapping = []
+    decoded_idx = -1
+
+    with tqdm(total=len(keyframe_indices), desc=f"Saving keyframes {video_path.name}", unit="frame", leave=False) as pbar:
+        while target_pos < len(keyframe_indices):
+            raw = proc.stdout.read(frame_size)
+            if not raw:
+                break
+            if len(raw) != frame_size:
+                proc.kill()
+                raise RuntimeError(f"Incomplete raw frame while saving keyframes from {video_path}")
+            decoded_idx += 1
+            target_frame = int(keyframe_indices[target_pos])
+            if decoded_idx < target_frame:
+                continue
+            if decoded_idx == target_frame:
+                frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
+                output_file = output_path / f"{target_pos:06d}.webp"
+                if cv2.imwrite(str(output_file), frame, [cv2.IMWRITE_WEBP_QUALITY, int(webp_quality)]):
+                    frames_mapping.append(
+                        (target_pos, decoded_idx / fps if fps > 0 else "", fps, decoded_idx)
+                    )
+                target_pos += 1
+                pbar.update(1)
+
+    if proc.stdout is not None:
+        proc.stdout.close()
+    stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr is not None else ""
+    return_code = proc.wait()
+    if target_pos < len(keyframe_indices):
+        raise RuntimeError(
+            f"Only saved {target_pos}/{len(keyframe_indices)} keyframes from {video_path}: {stderr[-1000:]}"
+        )
+    if return_code != 0 and not frames_mapping:
+        raise RuntimeError(f"FFmpeg keyframe stream failed for {video_path}: {stderr[-1000:]}")
     return frames_mapping
 
 
@@ -514,8 +598,8 @@ def save_frames(keyframe_indices_path: Path, video_path: Path, output_path: Path
     keyframe_indices = load_keyframe_indices(keyframe_indices_path)
     codec = codec_name(video_path)
     if codec == "av1":
-        print("Saving AV1 keyframes with batched FFmpeg/NVDEC.", flush=True)
-        rows = save_frames_ffmpeg_batch(
+        print("Saving AV1 keyframes with sequential FFmpeg/NVDEC.", flush=True)
+        rows = save_frames_ffmpeg_stream(
             keyframe_indices, video_path, output_path, webp_quality)
         write_mapping(output_path_map_keyframes, rows)
         return
