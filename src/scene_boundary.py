@@ -147,6 +147,18 @@ def codec_name(video_path: Path) -> str:
     return str(probe_video(video_path).get("codec_name") or "").lower()
 
 
+def ffmpeg_has_decoder(decoder_name: str) -> bool:
+    if shutil.which("ffmpeg") is None:
+        return False
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-decoders"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode == 0 and decoder_name in proc.stdout
+
+
 def video_info_cv2(video_path: Path) -> tuple[float, int]:
     import cv2
 
@@ -234,11 +246,96 @@ def transcode_to_h264(src_path: Path, dst_path: Path) -> None:
             f"FFmpeg fallback transcode failed for {src_path}: {proc.stderr[-1000:]}")
 
 
+def scene_ranges_from_ffmpeg_av1(video_path: Path, threshold: float, min_scene_len: int) -> np.ndarray:
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("FFmpeg executable not found for AV1 scene detection.")
+    if not ffmpeg_has_decoder("av1_cuvid"):
+        raise RuntimeError("FFmpeg av1_cuvid decoder not found for AV1 scene detection.")
+
+    stream = probe_video(video_path)
+    frame_count = int(stream.get("nb_frames") or 0) if str(
+        stream.get("nb_frames") or "").isdigit() else 0
+    width, height = 160, 90
+    frame_size = width * height
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-hwaccel",
+        "cuda",
+        "-c:v",
+        "av1_cuvid",
+        "-resize",
+        f"{width}x{height}",
+        "-i",
+        str(video_path),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "gray",
+        "-vsync",
+        "0",
+        "-",
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    assert proc.stdout is not None
+
+    previous: np.ndarray | None = None
+    scene_starts = [0]
+    frame_idx = -1
+    last_scene_start = 0
+    pbar = tqdm(total=frame_count if frame_count > 0 else None,
+                desc=f"FFmpeg scene {video_path.name}", unit="frame", leave=False)
+    while True:
+        raw = proc.stdout.read(frame_size)
+        if not raw:
+            break
+        if len(raw) != frame_size:
+            proc.kill()
+            raise RuntimeError(
+                f"Incomplete raw frame while detecting scenes in {video_path}")
+        frame_idx += 1
+        pbar.update(1)
+        frame = np.frombuffer(raw, dtype=np.uint8).astype(np.int16)
+        if previous is not None and frame_idx - last_scene_start >= min_scene_len:
+            score = float(np.mean(np.abs(frame - previous)))
+            if score >= threshold:
+                scene_starts.append(frame_idx)
+                last_scene_start = frame_idx
+        previous = frame
+
+    pbar.close()
+    stderr = proc.stderr.read().decode(
+        "utf-8", errors="replace") if proc.stderr is not None else ""
+    return_code = proc.wait()
+    if return_code != 0 and frame_idx < 0:
+        raise RuntimeError(
+            f"FFmpeg AV1 scene detection failed for {video_path}: {stderr[-1000:]}")
+    if frame_idx < 0:
+        return np.empty((0, 2), dtype=np.int64)
+
+    ranges = []
+    for start, next_start in zip(scene_starts, scene_starts[1:]):
+        ranges.append((start, max(start, next_start - 1)))
+    ranges.append((scene_starts[-1], frame_idx))
+    return np.asarray(ranges, dtype=np.int64)
+
+
 def detect_scene_ranges(video_path: Path, threshold: float, min_scene_len: int) -> np.ndarray:
+    codec = codec_name(video_path)
+    if codec == "av1":
+        try:
+            print("Using FFmpeg/NVDEC for AV1 scene detection.", flush=True)
+            return scene_ranges_from_ffmpeg_av1(video_path, threshold, min_scene_len)
+        except Exception as ffmpeg_exc:
+            print(
+                f"FFmpeg/NVDEC scene detection failed for {video_path}: {ffmpeg_exc}", flush=True)
+
     try:
         return scene_ranges_from_video(video_path, threshold, min_scene_len)
     except Exception as exc:
-        codec = codec_name(video_path)
         print(
             f"Normal scene detection failed for {video_path} (codec={codec or 'unknown'}): {exc}", flush=True)
 
