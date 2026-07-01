@@ -372,6 +372,8 @@ def extract_frames_ffmpeg_batch(video_path: Path, keyframe_indices: np.ndarray, 
         raise RuntimeError(
             "FFmpeg executable not found. Install ffmpeg for AV1 frame extraction.")
     output_path.mkdir(parents=True, exist_ok=True)
+    if len(keyframe_indices) == 0:
+        return
     input_args = []
     if codec_name(video_path) == "av1" and ffmpeg_has_decoder("av1_cuvid"):
         input_args = ["-hwaccel", "cuda", "-c:v", "av1_cuvid"]
@@ -379,49 +381,78 @@ def extract_frames_ffmpeg_batch(video_path: Path, keyframe_indices: np.ndarray, 
     # Run one decode pass. Splitting into chunks makes FFmpeg rescan AV1 videos
     # from the start for every chunk, which is much slower than a single select.
     chunk_size = len(keyframe_indices)
-    for start in tqdm(range(0, len(keyframe_indices), chunk_size), desc=f"Saving keyframes {video_path.name}", leave=False):
-        chunk = [int(idx) for idx in keyframe_indices[start: start + chunk_size]]
-        if not chunk:
-            continue
-        select_expr = "+".join(f"eq(n\\,{idx})" for idx in chunk)
-        with tempfile.TemporaryDirectory(prefix="aic_keyframes_", dir=output_path) as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            cmd = [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                *input_args,
-                "-i",
-                str(video_path),
-                "-vf",
-                f"select={select_expr}",
-                "-vsync",
-                "vfr",
-                "-compression_level",
-                "0",
-                "-quality",
-                str(int(webp_quality)),
-                str(tmp_path / "%06d.webp"),
-            ]
-            proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
-            if proc.returncode != 0:
-                raise RuntimeError(
-                    f"FFmpeg batch keyframe extraction failed for {video_path}: {proc.stderr[-1000:]}")
-
-            extracted = sorted(tmp_path.glob("*.webp"))
-            if len(extracted) != len(chunk):
-                for key_frame_idx, frame_idx in enumerate(chunk, start=start):
-                    extract_frame_ffmpeg(
-                        video_path, frame_idx, output_path / f"{key_frame_idx:06d}.webp")
+    saved_count = 0
+    with tqdm(total=len(keyframe_indices), desc=f"Saving keyframes {video_path.name}", unit="frame", leave=False) as pbar:
+        for start in range(0, len(keyframe_indices), chunk_size):
+            chunk = [int(idx) for idx in keyframe_indices[start: start + chunk_size]]
+            if not chunk:
                 continue
-
-            for offset, extracted_file in enumerate(extracted):
-                shutil.move(
-                    str(extracted_file),
-                    str(output_path / f"{start + offset:06d}.webp"),
+            select_expr = "+".join(f"eq(n\\,{idx})" for idx in chunk)
+            with tempfile.TemporaryDirectory(prefix="aic_keyframes_", dir=output_path) as tmp_dir:
+                tmp_path = Path(tmp_dir)
+                cmd = [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    *input_args,
+                    "-i",
+                    str(video_path),
+                    "-vf",
+                    f"select={select_expr}",
+                    "-vsync",
+                    "vfr",
+                    "-compression_level",
+                    "0",
+                    "-quality",
+                    str(int(webp_quality)),
+                    str(tmp_path / "%06d.webp"),
+                ]
+                proc = subprocess.Popen(
+                    cmd,
+                    text=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                 )
+                last_seen = 0
+                while proc.poll() is None:
+                    current_seen = len(list(tmp_path.glob("*.webp")))
+                    if current_seen > last_seen:
+                        pbar.update(current_seen - last_seen)
+                        last_seen = current_seen
+                    time.sleep(0.5)
+
+                stderr = proc.stderr.read() if proc.stderr is not None else ""
+                if proc.returncode != 0:
+                    raise RuntimeError(
+                        f"FFmpeg batch keyframe extraction failed for {video_path}: {stderr[-1000:]}")
+
+                extracted = sorted(tmp_path.glob("*.webp"))
+                if len(extracted) > last_seen:
+                    pbar.update(len(extracted) - last_seen)
+                if len(extracted) != len(chunk):
+                    for offset, extracted_file in enumerate(extracted):
+                        shutil.move(
+                            str(extracted_file),
+                            str(output_path / f"{start + offset:06d}.webp"),
+                        )
+                    for key_frame_idx, frame_idx in enumerate(chunk[len(extracted):], start=start + len(extracted)):
+                        output_file = output_path / f"{key_frame_idx:06d}.webp"
+                        if not output_file.exists():
+                            extract_frame_ffmpeg(video_path, frame_idx, output_file)
+                            pbar.update(1)
+                    saved_count += len(chunk)
+                    continue
+
+                for offset, extracted_file in enumerate(extracted):
+                    shutil.move(
+                        str(extracted_file),
+                        str(output_path / f"{start + offset:06d}.webp"),
+                    )
+                saved_count += len(extracted)
+                if pbar.n < saved_count:
+                    pbar.update(saved_count - pbar.n)
 
     missing = [
         output_path / f"{idx:06d}.webp"
