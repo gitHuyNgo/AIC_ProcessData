@@ -43,6 +43,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-scene-len", type=int, default=15)
     parser.add_argument("--webp-quality", type=int, default=80)
     parser.add_argument("--limit-videos", type=int, default=0)
+    parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Split the sorted video list into this many shards for parallel runs.",
+    )
+    parser.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="Run only this zero-based shard index when --num-shards > 1.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--skip-encode", action="store_true")
     parser.add_argument("--skip-scene-boundary", action="store_true")
@@ -95,10 +107,17 @@ def output_paths(video_path: Path, video_root: Path) -> dict[str, Path]:
 
 
 def run_pipeline(args: argparse.Namespace) -> None:
+    if args.num_shards < 1:
+        raise ValueError("--num-shards must be >= 1")
+    if args.shard_index < 0 or args.shard_index >= args.num_shards:
+        raise ValueError("--shard-index must be in [0, --num-shards)")
+
     video_root = args.video_root.resolve()
     videos = find_mp4_files(video_root)
     if args.limit_videos > 0:
         videos = videos[: args.limit_videos]
+    if args.num_shards > 1:
+        videos = videos[args.shard_index:: args.num_shards]
     if not videos:
         print(f"No .mp4 files found in {video_root}")
         return
