@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scene-downscale",
         type=int,
-        default=2,
+        default=1,
         help="Downscale factor for PySceneDetect. Use 1 to disable.",
     )
     parser.add_argument("--webp-quality", type=int, default=80)

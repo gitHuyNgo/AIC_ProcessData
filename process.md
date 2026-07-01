@@ -327,11 +327,10 @@ Run PySceneDetect for every video after embeddings are done:
 python src/pipeline.py --device cuda \
   --skip-encode \
   --skip-clustering \
-  --skip-save-keyframes \
-  --scene-downscale 4
+  --skip-save-keyframes
 ```
 
-Use `--scene-downscale 1` if you want full-resolution PySceneDetect behavior. Larger values are faster but can slightly change scene boundaries.
+PySceneDetect runs at full resolution by default. If you need a faster approximate run later, add `--scene-downscale 4`.
 
 ### 9.3 Select Keyframe Indices
 
@@ -398,8 +397,7 @@ Resume scene boundary:
 python src/pipeline.py --device cuda \
   --skip-encode \
   --skip-clustering \
-  --skip-save-keyframes \
-  --scene-downscale 4
+  --skip-save-keyframes
 ```
 
 Resume clustering:

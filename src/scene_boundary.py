@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scene-downscale",
         type=int,
-        default=2,
+        default=1,
         help="Downscale factor for PySceneDetect. Use 1 to disable.",
     )
     parser.add_argument("--limit-videos", type=int, default=0)
@@ -189,7 +189,7 @@ def video_info(video_path: Path) -> tuple[float, int]:
         return fps, frame_count
 
 
-def scene_ranges_from_video(video_path: Path, threshold: float, min_scene_len: int, backend: str | None = None, downscale: int = 2) -> np.ndarray:
+def scene_ranges_from_video(video_path: Path, threshold: float, min_scene_len: int, backend: str | None = None, downscale: int = 1) -> np.ndarray:
     try:
         from scenedetect import SceneManager, open_video
         from scenedetect.detectors import ContentDetector
@@ -261,7 +261,7 @@ def transcode_to_h264(src_path: Path, dst_path: Path) -> None:
             f"FFmpeg fallback transcode failed for {src_path}: {proc.stderr[-1000:]}")
 
 
-def detect_scene_ranges(video_path: Path, threshold: float, min_scene_len: int, downscale: int = 2) -> np.ndarray:
+def detect_scene_ranges(video_path: Path, threshold: float, min_scene_len: int, downscale: int = 1) -> np.ndarray:
     codec = codec_name(video_path)
     if codec == "av1":
         with tempfile.TemporaryDirectory(prefix="aic_av1_scene_") as tmp_dir:
