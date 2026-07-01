@@ -7,6 +7,7 @@ import os
 import queue
 import shutil
 import subprocess
+import tempfile
 import time
 from multiprocessing import JoinableQueue
 from pathlib import Path
@@ -380,32 +381,45 @@ def extract_frames_ffmpeg_batch(video_path: Path, keyframe_indices: np.ndarray, 
         chunk = [int(idx) for idx in keyframe_indices[start: start + chunk_size]]
         if not chunk:
             continue
-        select_expr = "+".join(f"eq(n\\,{idx})" for idx in chunk)
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            *input_args,
-            "-i",
-            str(video_path),
-            "-vf",
-            f"select={select_expr}",
-            "-vsync",
-            "vfr",
-            "-start_number",
-            str(start),
-            "-compression_level",
-            "4",
-            "-quality",
-            str(int(webp_quality)),
-            str(output_path / "%06d.webp"),
-        ]
-        proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"FFmpeg batch keyframe extraction failed for {video_path}: {proc.stderr[-1000:]}")
+        select_expr = "+".join(f"eq(n,{idx})" for idx in chunk)
+        with tempfile.TemporaryDirectory(prefix="aic_keyframes_", dir=output_path) as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                *input_args,
+                "-i",
+                str(video_path),
+                "-vf",
+                f"select='{select_expr}'",
+                "-vsync",
+                "vfr",
+                "-compression_level",
+                "4",
+                "-quality",
+                str(int(webp_quality)),
+                str(tmp_path / "%06d.webp"),
+            ]
+            proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"FFmpeg batch keyframe extraction failed for {video_path}: {proc.stderr[-1000:]}")
+
+            extracted = sorted(tmp_path.glob("*.webp"))
+            if len(extracted) != len(chunk):
+                for key_frame_idx, frame_idx in enumerate(chunk, start=start):
+                    extract_frame_ffmpeg(
+                        video_path, frame_idx, output_path / f"{key_frame_idx:06d}.webp")
+                continue
+
+            for offset, extracted_file in enumerate(extracted):
+                shutil.move(
+                    str(extracted_file),
+                    str(output_path / f"{start + offset:06d}.webp"),
+                )
 
     missing = [
         output_path / f"{idx:06d}.webp"
