@@ -344,20 +344,7 @@ python src/pipeline.py --device cuda \
   --skip-save-keyframes
 ```
 
-### 9.4 Save Keyframe Images
-
-Save full-resolution `.webp` keyframes after keyframe index files exist:
-
-```bash
-python src/pipeline.py --device cuda \
-  --skip-encode \
-  --skip-scene-boundary \
-  --skip-clustering
-```
-
-The saved keyframes keep the original video resolution.
-
-### 9.5 Save Keyframes In Parallel
+### 9.4 Save Keyframes In Parallel
 
 The save-keyframes phase can be sharded across multiple processes because it does not load the ViT-H-14 model:
 
@@ -378,7 +365,9 @@ wait
 
 If CPU, disk, or WebP encoding becomes overloaded, use `SHARDS=2`.
 
-### 9.6 Rerun A Phase
+The saved keyframes keep the original video resolution.
+
+### 9.5 Rerun A Phase
 
 To rerun and overwrite outputs for a phase, add `--overwrite` to that phase command. For example, rerun only clustering:
 
@@ -390,7 +379,7 @@ python src/pipeline.py --device cuda \
   --skip-save-keyframes
 ```
 
-### 9.7 Resume After A Stop
+### 9.6 Resume After A Stop
 
 If the job is interrupted, run the same phase command again **without** `--overwrite`. The pipeline skips files that already exist and continues with the unfinished videos.
 
