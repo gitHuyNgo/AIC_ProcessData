@@ -6,7 +6,7 @@ This guide describes the full workflow for running the project on VastAI:
 2. Install system tools and Python dependencies.
 3. Download zipped `.mp4` data from Google Drive.
 4. Extract videos into the expected input folder.
-5. Run the processing pipeline.
+5. Run the processing pipeline in phases.
 6. Zip all outputs.
 7. Upload the final zip files back to Google Drive.
 
@@ -279,37 +279,115 @@ The pipeline scans `.mp4` files recursively, so nested folders inside the zip fi
 
 ## 8. Test The Pipeline
 
-Before running everything, test on two videos:
+Before running everything, test the same phase order on two videos:
 
 ```bash
-python src/pipeline.py --device cuda --limit-videos 2
+python src/pipeline.py --device cuda --limit-videos 2 --overwrite --skip-scene-boundary --skip-clustering --skip-save-keyframes
+python src/pipeline.py --device cuda --limit-videos 2 --overwrite --skip-encode --skip-clustering --skip-save-keyframes
+python src/pipeline.py --device cuda --limit-videos 2 --overwrite --skip-encode --skip-scene-boundary --skip-save-keyframes
+python src/pipeline.py --device cuda --limit-videos 2 --overwrite --skip-encode --skip-scene-boundary --skip-clustering
 ```
 
 If CUDA is not available, use CPU:
 
 ```bash
-python src/pipeline.py --device cpu --limit-videos 2
+python src/pipeline.py --device cpu --limit-videos 2 --overwrite --skip-scene-boundary --skip-clustering --skip-save-keyframes
+python src/pipeline.py --device cpu --limit-videos 2 --overwrite --skip-encode --skip-clustering --skip-save-keyframes
+python src/pipeline.py --device cpu --limit-videos 2 --overwrite --skip-encode --skip-scene-boundary --skip-save-keyframes
+python src/pipeline.py --device cpu --limit-videos 2 --overwrite --skip-encode --skip-scene-boundary --skip-clustering
 ```
 
-## 9. Run The Full Pipeline
+The four commands run:
 
-Run all videos:
+1. `encode_video` only.
+2. `scene_boundary` only.
+3. `clustering` only.
+4. `save_keyframes` only.
+
+## 9. Run The Full Pipeline In Phases
+
+Run all videos in this order. This keeps the heavy ViT-H-14 model loaded only during the encode phase, then runs the later CPU/IO-heavy phases separately.
+
+### 9.1 Encode All Videos
+
+Create frame embeddings for every video:
 
 ```bash
-python src/pipeline.py --device cuda
+python src/pipeline.py --device cuda \
+  --skip-scene-boundary \
+  --skip-clustering \
+  --skip-save-keyframes
 ```
 
-The pipeline runs these steps in order:
+### 9.2 Detect Scene Boundaries
 
-1. `encode_video`: creates frame embeddings.
-2. `scene_boundary`: detects scene boundaries.
-3. `clustering`: selects keyframe indices.
-4. `save_keyframes`: saves keyframe images and mapping files.
-
-To rerun and overwrite existing outputs:
+Run PySceneDetect for every video after embeddings are done:
 
 ```bash
-python src/pipeline.py --device cuda --overwrite
+python src/pipeline.py --device cuda \
+  --skip-encode \
+  --skip-clustering \
+  --skip-save-keyframes \
+  --scene-downscale 4
+```
+
+Use `--scene-downscale 1` if you want full-resolution PySceneDetect behavior. Larger values are faster but can slightly change scene boundaries.
+
+### 9.3 Select Keyframe Indices
+
+Run clustering after scene boundary files exist:
+
+```bash
+python src/pipeline.py --device cuda \
+  --skip-encode \
+  --skip-scene-boundary \
+  --skip-save-keyframes
+```
+
+### 9.4 Save Keyframe Images
+
+Save full-resolution `.webp` keyframes after keyframe index files exist:
+
+```bash
+python src/pipeline.py --device cuda \
+  --skip-encode \
+  --skip-scene-boundary \
+  --skip-clustering
+```
+
+The saved keyframes keep the original video resolution.
+
+### 9.5 Save Keyframes In Parallel
+
+The save-keyframes phase can be sharded across multiple processes because it does not load the ViT-H-14 model:
+
+```bash
+SHARDS=4
+
+for i in $(seq 0 $((SHARDS - 1))); do
+  python src/pipeline.py --device cuda \
+    --skip-encode \
+    --skip-scene-boundary \
+    --skip-clustering \
+    --num-shards "$SHARDS" \
+    --shard-index "$i" &
+done
+
+wait
+```
+
+If CPU, disk, or WebP encoding becomes overloaded, use `SHARDS=2`.
+
+### 9.6 Rerun A Phase
+
+To rerun and overwrite outputs for a phase, add `--overwrite` to that phase command. For example, rerun only clustering:
+
+```bash
+python src/pipeline.py --device cuda \
+  --overwrite \
+  --skip-encode \
+  --skip-scene-boundary \
+  --skip-save-keyframes
 ```
 
 ## 10. Output Structure
