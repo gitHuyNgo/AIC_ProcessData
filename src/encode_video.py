@@ -288,6 +288,38 @@ def encode_tensor_batch(model, batch: list[torch.Tensor], device: torch.device) 
     return features.float().cpu().numpy().astype(np.float16)
 
 
+def preprocess_normalize_values(preprocess) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    for transform in getattr(preprocess, "transforms", []):
+        mean = getattr(transform, "mean", None)
+        std = getattr(transform, "std", None)
+        if mean is not None and std is not None:
+            return tuple(float(x) for x in mean), tuple(float(x) for x in std)
+    return (0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)
+
+
+def preprocess_image_size(preprocess, default: int = 224) -> int:
+    for transform in getattr(preprocess, "transforms", []):
+        size = getattr(transform, "size", None)
+        if isinstance(size, int):
+            return size
+        if isinstance(size, (tuple, list)) and size:
+            return int(size[0])
+    return default
+
+
+def encode_numpy_batch(model, frames: list[np.ndarray], device: torch.device, mean: torch.Tensor, std: torch.Tensor) -> np.ndarray:
+    tensor = torch.from_numpy(np.stack(frames)).permute(
+        0, 3, 1, 2).contiguous()
+    tensor = tensor.to(device, non_blocking=True).float().div_(255.0)
+    tensor = tensor.sub_(mean).div_(std)
+    if device.type == "cuda":
+        tensor = tensor.half()
+    with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
+        features = model.encode_image(tensor)
+        features = features / features.norm(dim=-1, keepdim=True)
+    return features.float().cpu().numpy().astype(np.float16)
+
+
 def save_embedding_chunks(output_path: Path, chunks: list[np.ndarray]) -> None:
     if not chunks:
         raise RuntimeError(f"No frames encoded for {output_path}")
@@ -346,12 +378,21 @@ def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, 
     if width <= 0 or height <= 0:
         raise RuntimeError(f"Could not probe width/height for {video_path}")
 
-    output_width, output_height = get_resized_imgsize(width, height, 224)
-    output_width = max(2, output_width // 2 * 2)
-    output_height = max(2, output_height // 2 * 2)
+    image_size = preprocess_image_size(preprocess)
+    output_width = output_height = image_size
+    mean_values, std_values = preprocess_normalize_values(preprocess)
+    mean = torch.tensor(mean_values, device=device).view(1, 3, 1, 1)
+    std = torch.tensor(std_values, device=device).view(1, 3, 1, 1)
 
     input_args = []
-    output_args = ["-vf", f"scale={output_width}:{output_height}:flags=bicubic"]
+    output_args = [
+        "-vf",
+        (
+            f"scale='if(gt(a,1),-2,{image_size})':"
+            f"'if(gt(a,1),{image_size},-2)':flags=bicubic,"
+            f"crop={image_size}:{image_size}"
+        ),
+    ]
     codec = str(stream.get("codec_name") or "").lower()
     if use_nvdec and codec == "av1" and ffmpeg_has_decoder("av1_cuvid"):
         input_args = [
@@ -359,10 +400,7 @@ def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, 
             "cuda",
             "-c:v",
             "av1_cuvid",
-            "-resize",
-            f"{output_width}x{output_height}",
         ]
-        output_args = []
 
     cmd = [
         "ffmpeg",
@@ -386,7 +424,7 @@ def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, 
     assert proc.stdout is not None
     frame_size = output_width * output_height * 3
     frame_idx = -1
-    batch: list[torch.Tensor] = []
+    batch: list[np.ndarray] = []
     chunks: list[np.ndarray] = []
 
     decode_label = "FFmpeg NVDEC" if input_args else "FFmpeg decode"
@@ -406,9 +444,9 @@ def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, 
             continue
         frame = np.frombuffer(raw, dtype=np.uint8).reshape(
             (output_height, output_width, 3))
-        batch.append(preprocess(Image.fromarray(frame)))
+        batch.append(frame.copy())
         if len(batch) >= batch_size:
-            chunks.append(encode_tensor_batch(model, batch, device))
+            chunks.append(encode_numpy_batch(model, batch, device, mean, std))
             batch = []
 
     pbar.close()
@@ -419,7 +457,7 @@ def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, 
         raise RuntimeError(
             f"FFmpeg decode failed for {video_path}: {stderr[-1000:]}")
     if batch:
-        chunks.append(encode_tensor_batch(model, batch, device))
+        chunks.append(encode_numpy_batch(model, batch, device, mean, std))
     save_embedding_chunks(output_path, chunks)
 
 
