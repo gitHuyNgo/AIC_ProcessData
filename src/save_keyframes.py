@@ -366,6 +366,57 @@ def extract_frame_fallback(video_path: Path, frame_idx: int, output_file: Path) 
         extract_frame_ffmpeg(video_path, frame_idx, output_file)
 
 
+def extract_frames_ffmpeg_batch(video_path: Path, keyframe_indices: np.ndarray, output_path: Path, webp_quality: int) -> None:
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError(
+            "FFmpeg executable not found. Install ffmpeg for AV1 frame extraction.")
+    output_path.mkdir(parents=True, exist_ok=True)
+    input_args = []
+    if codec_name(video_path) == "av1" and ffmpeg_has_decoder("av1_cuvid"):
+        input_args = ["-hwaccel", "cuda", "-c:v", "av1_cuvid"]
+
+    chunk_size = 200
+    for start in tqdm(range(0, len(keyframe_indices), chunk_size), desc=f"Saving keyframes {video_path.name}", leave=False):
+        chunk = [int(idx) for idx in keyframe_indices[start: start + chunk_size]]
+        if not chunk:
+            continue
+        select_expr = "+".join(f"eq(n\\,{idx})" for idx in chunk)
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            *input_args,
+            "-i",
+            str(video_path),
+            "-vf",
+            f"select={select_expr}",
+            "-vsync",
+            "vfr",
+            "-start_number",
+            str(start),
+            "-compression_level",
+            "4",
+            "-quality",
+            str(int(webp_quality)),
+            str(output_path / "%06d.webp"),
+        ]
+        proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"FFmpeg batch keyframe extraction failed for {video_path}: {proc.stderr[-1000:]}")
+
+    missing = [
+        output_path / f"{idx:06d}.webp"
+        for idx in range(len(keyframe_indices))
+        if not (output_path / f"{idx:06d}.webp").exists()
+    ]
+    if missing:
+        raise RuntimeError(
+            f"FFmpeg did not create {len(missing)} expected keyframe files under {output_path}")
+
+
 def save_frames_cv2(keyframe_indices: np.ndarray, video_path: Path, output_path: Path, webp_quality: int) -> list[tuple]:
     import cv2
 
@@ -402,13 +453,23 @@ def save_frames_ffmpeg(keyframe_indices: np.ndarray, video_path: Path, output_pa
     return rows
 
 
+def save_frames_ffmpeg_batch(keyframe_indices: np.ndarray, video_path: Path, output_path: Path, webp_quality: int) -> list[tuple]:
+    fps = video_fps(video_path)
+    extract_frames_ffmpeg_batch(video_path, keyframe_indices, output_path, webp_quality)
+    return [
+        (key_frame_idx, frame_idx / fps if fps > 0 else "", fps, int(frame_idx))
+        for key_frame_idx, frame_idx in enumerate(keyframe_indices)
+    ]
+
+
 def save_frames(keyframe_indices_path: Path, video_path: Path, output_path: Path, output_path_map_keyframes: Path, webp_quality: int) -> None:
     output_path.mkdir(parents=True, exist_ok=True)
     keyframe_indices = load_keyframe_indices(keyframe_indices_path)
     codec = codec_name(video_path)
     if codec == "av1":
-        print("Saving AV1 keyframes with FFmpeg/NVDEC.", flush=True)
-        rows = save_frames_ffmpeg(keyframe_indices, video_path, output_path)
+        print("Saving AV1 keyframes with batched FFmpeg/NVDEC.", flush=True)
+        rows = save_frames_ffmpeg_batch(
+            keyframe_indices, video_path, output_path, webp_quality)
         write_mapping(output_path_map_keyframes, rows)
         return
     try:
