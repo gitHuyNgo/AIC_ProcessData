@@ -376,7 +376,9 @@ def extract_frames_ffmpeg_batch(video_path: Path, keyframe_indices: np.ndarray, 
     if codec_name(video_path) == "av1" and ffmpeg_has_decoder("av1_cuvid"):
         input_args = ["-hwaccel", "cuda", "-c:v", "av1_cuvid"]
 
-    chunk_size = 200
+    # Run one decode pass. Splitting into chunks makes FFmpeg rescan AV1 videos
+    # from the start for every chunk, which is much slower than a single select.
+    chunk_size = len(keyframe_indices)
     for start in tqdm(range(0, len(keyframe_indices), chunk_size), desc=f"Saving keyframes {video_path.name}", leave=False):
         chunk = [int(idx) for idx in keyframe_indices[start: start + chunk_size]]
         if not chunk:
