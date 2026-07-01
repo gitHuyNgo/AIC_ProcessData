@@ -41,6 +41,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--content-threshold", type=float, default=27.0)
     parser.add_argument("--min-scene-len", type=int, default=15)
+    parser.add_argument(
+        "--scene-downscale",
+        type=int,
+        default=2,
+        help="Downscale factor for PySceneDetect. Use 1 to disable.",
+    )
     parser.add_argument("--webp-quality", type=int, default=80)
     parser.add_argument("--limit-videos", type=int, default=0)
     parser.add_argument(
@@ -149,6 +155,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
                     video_path,
                     args.content_threshold,
                     args.min_scene_len,
+                    args.scene_downscale,
                 )
                 paths["scene"].parent.mkdir(parents=True, exist_ok=True)
                 np.savetxt(paths["scene"], scene_ranges, fmt="%d %d")

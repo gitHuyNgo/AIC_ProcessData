@@ -24,6 +24,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--content-threshold", type=float, default=27.0)
     parser.add_argument("--min-scene-len", type=int, default=15)
+    parser.add_argument(
+        "--scene-downscale",
+        type=int,
+        default=2,
+        help="Downscale factor for PySceneDetect. Use 1 to disable.",
+    )
     parser.add_argument("--limit-videos", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -183,7 +189,7 @@ def video_info(video_path: Path) -> tuple[float, int]:
         return fps, frame_count
 
 
-def scene_ranges_from_video(video_path: Path, threshold: float, min_scene_len: int, backend: str | None = None) -> np.ndarray:
+def scene_ranges_from_video(video_path: Path, threshold: float, min_scene_len: int, backend: str | None = None, downscale: int = 2) -> np.ndarray:
     try:
         from scenedetect import SceneManager, open_video
         from scenedetect.detectors import ContentDetector
@@ -195,9 +201,14 @@ def scene_ranges_from_video(video_path: Path, threshold: float, min_scene_len: i
     video = open_video(
         str(video_path), backend=backend) if backend else open_video(str(video_path))
     scene_manager = SceneManager()
+    if downscale > 1:
+        if hasattr(scene_manager, "auto_downscale"):
+            scene_manager.auto_downscale = False
+        if hasattr(scene_manager, "downscale"):
+            scene_manager.downscale = int(downscale)
     scene_manager.add_detector(ContentDetector(
         threshold=threshold, min_scene_len=min_scene_len))
-    scene_manager.detect_scenes(video)
+    scene_manager.detect_scenes(video, show_progress=True)
     scenes = scene_manager.get_scene_list()
 
     ranges = []
@@ -250,7 +261,7 @@ def transcode_to_h264(src_path: Path, dst_path: Path) -> None:
             f"FFmpeg fallback transcode failed for {src_path}: {proc.stderr[-1000:]}")
 
 
-def detect_scene_ranges(video_path: Path, threshold: float, min_scene_len: int) -> np.ndarray:
+def detect_scene_ranges(video_path: Path, threshold: float, min_scene_len: int, downscale: int = 2) -> np.ndarray:
     codec = codec_name(video_path)
     if codec == "av1":
         with tempfile.TemporaryDirectory(prefix="aic_av1_scene_") as tmp_dir:
@@ -258,17 +269,17 @@ def detect_scene_ranges(video_path: Path, threshold: float, min_scene_len: int) 
             print(
                 "Running PySceneDetect after temporary FFmpeg/NVDEC H.264 transcode.", flush=True)
             transcode_to_h264(video_path, tmp_path)
-            return scene_ranges_from_video(tmp_path, threshold, min_scene_len)
+            return scene_ranges_from_video(tmp_path, threshold, min_scene_len, downscale=downscale)
 
     try:
-        return scene_ranges_from_video(video_path, threshold, min_scene_len)
+        return scene_ranges_from_video(video_path, threshold, min_scene_len, downscale=downscale)
     except Exception as exc:
         print(
             f"Normal scene detection failed for {video_path} (codec={codec or 'unknown'}): {exc}", flush=True)
 
     try:
         print("Retrying scene detection with PySceneDetect pyav backend.", flush=True)
-        return scene_ranges_from_video(video_path, threshold, min_scene_len, backend="pyav")
+        return scene_ranges_from_video(video_path, threshold, min_scene_len, backend="pyav", downscale=downscale)
     except Exception as pyav_exc:
         print(
             f"PyAV scene detection fallback failed for {video_path}: {pyav_exc}", flush=True)
@@ -278,7 +289,7 @@ def detect_scene_ranges(video_path: Path, threshold: float, min_scene_len: int) 
         print(
             "Retrying scene detection after temporary FFmpeg H.264 transcode.", flush=True)
         transcode_to_h264(video_path, tmp_path)
-        return scene_ranges_from_video(tmp_path, threshold, min_scene_len)
+        return scene_ranges_from_video(tmp_path, threshold, min_scene_len, downscale=downscale)
 
 
 def main() -> None:
@@ -311,7 +322,7 @@ def main() -> None:
                 continue
             wait_for_file(video_path)
             scene_ranges = detect_scene_ranges(
-                video_path, args.content_threshold, args.min_scene_len)
+                video_path, args.content_threshold, args.min_scene_len, args.scene_downscale)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             np.savetxt(output_path, scene_ranges, fmt="%d %d")
             print(f"{video_path.name}: {len(scene_ranges)} scenes -> {output_path}")
