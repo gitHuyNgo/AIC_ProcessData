@@ -3,9 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import shutil
 import subprocess
+import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -105,6 +108,9 @@ def load_model(args: argparse.Namespace):
         raise RuntimeError(
             "CUDA requested but torch.cuda.is_available() is false.")
     device = torch.device("cuda:0" if args.device == "cuda" else "cpu")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")
     model, _, preprocess = open_clip.create_model_and_transforms(
         args.model_arch,
         pretrained=args.model_pretrained or None,
@@ -266,6 +272,7 @@ def codec_name(video_path: Path) -> str:
     return str(probe_video(video_path).get("codec_name") or "").lower()
 
 
+@lru_cache(maxsize=None)
 def ffmpeg_has_decoder(decoder_name: str) -> bool:
     if shutil.which("ffmpeg") is None:
         return False
@@ -301,7 +308,7 @@ def encode_tensor_batch(model, batch: list[torch.Tensor], device: torch.device) 
     tensor = torch.stack(batch).to(device, non_blocking=True)
     if device.type == "cuda":
         tensor = tensor.half()
-    with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
+    with torch.inference_mode(), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
         features = model.encode_image(tensor)
         features = features / features.norm(dim=-1, keepdim=True)
     return features.float().cpu().numpy().astype(np.float16)
@@ -333,7 +340,7 @@ def encode_numpy_batch(model, frames: list[np.ndarray], device: torch.device, me
     tensor = tensor.sub_(mean).div_(std)
     if device.type == "cuda":
         tensor = tensor.half()
-    with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
+    with torch.inference_mode(), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=device.type == "cuda"):
         features = model.encode_image(tensor)
         features = features / features.norm(dim=-1, keepdim=True)
     return features.float().cpu().numpy().astype(np.float16)
@@ -443,41 +450,68 @@ def encode_video_ffmpeg(video_path: Path, output_path: Path, model, preprocess, 
                             stderr=subprocess.PIPE)
     assert proc.stdout is not None
     frame_size = output_width * output_height * 3
-    frame_idx = -1
-    batch: list[np.ndarray] = []
+    batch_queue: queue.Queue[list[np.ndarray] | None] = queue.Queue(maxsize=2)
+    reader_errors: list[BaseException] = []
     chunks: list[np.ndarray] = []
 
     decode_label = "FFmpeg NVDEC" if input_args else "FFmpeg decode"
     pbar = tqdm(total=frame_count if frame_count > 0 else None,
                 desc=f"{decode_label} {video_path.name}", unit="frame")
-    while True:
-        raw = proc.stdout.read(frame_size)
-        if not raw:
-            break
-        if len(raw) != frame_size:
-            proc.kill()
-            raise RuntimeError(
-                f"Incomplete raw frame while decoding {video_path}")
-        frame_idx += 1
-        pbar.update(1)
-        if sample_every > 1 and frame_idx % sample_every != 0:
-            continue
-        frame = np.frombuffer(raw, dtype=np.uint8).reshape(
-            (output_height, output_width, 3))
-        batch.append(frame.copy())
-        if len(batch) >= batch_size:
-            chunks.append(encode_numpy_batch(model, batch, device, mean, std))
-            batch = []
 
-    pbar.close()
+    def read_batches() -> None:
+        frame_idx = -1
+        batch: list[np.ndarray] = []
+        try:
+            while True:
+                raw = proc.stdout.read(frame_size)
+                if not raw:
+                    break
+                if len(raw) != frame_size:
+                    proc.kill()
+                    raise RuntimeError(
+                        f"Incomplete raw frame while decoding {video_path}")
+                frame_idx += 1
+                pbar.update(1)
+                if sample_every > 1 and frame_idx % sample_every != 0:
+                    continue
+                frame = np.frombuffer(raw, dtype=np.uint8).reshape(
+                    (output_height, output_width, 3))
+                batch.append(frame)
+                if len(batch) >= batch_size:
+                    batch_queue.put(batch)
+                    batch = []
+            if batch:
+                batch_queue.put(batch)
+        except BaseException as exc:
+            reader_errors.append(exc)
+        finally:
+            batch_queue.put(None)
+
+    reader = threading.Thread(target=read_batches, daemon=True)
+    reader.start()
+    reader_finished = False
+    try:
+        while True:
+            batch = batch_queue.get()
+            if batch is None:
+                break
+            chunks.append(encode_numpy_batch(model, batch, device, mean, std))
+        reader_finished = True
+    except BaseException:
+        proc.kill()
+        raise
+    finally:
+        reader.join(timeout=None if reader_finished else 2.0)
+        pbar.close()
+
     stderr = proc.stderr.read().decode(
         "utf-8", errors="replace") if proc.stderr is not None else ""
     return_code = proc.wait()
-    if return_code != 0 and not chunks and not batch:
+    if reader_errors:
+        raise RuntimeError(f"FFmpeg decode reader failed for {video_path}: {reader_errors[0]}")
+    if return_code != 0 and not chunks:
         raise RuntimeError(
             f"FFmpeg decode failed for {video_path}: {stderr[-1000:]}")
-    if batch:
-        chunks.append(encode_numpy_batch(model, batch, device, mean, std))
     save_embedding_chunks(output_path, chunks)
 
 
@@ -523,6 +557,14 @@ def encode_video(video_path: Path, output_path: Path, model, preprocess, device:
     except Exception as ffmpeg_exc:
         print(
             f"FFmpeg fast decode failed for {video_path} (codec={codec or 'unknown'}): {ffmpeg_exc}", flush=True)
+    try:
+        print("Retrying with FFmpeg software decode fast path.", flush=True)
+        encode_video_ffmpeg(video_path, output_path, model,
+                            preprocess, device, batch_size, sample_every, use_nvdec=False)
+        return
+    except Exception as ffmpeg_soft_exc:
+        print(
+            f"FFmpeg software decode failed for {video_path} (codec={codec or 'unknown'}): {ffmpeg_soft_exc}", flush=True)
     if codec == "av1":
         print("Retrying with PyAV CPU fallback for AV1.", flush=True)
         encode_video_pyav(video_path, output_path, model,

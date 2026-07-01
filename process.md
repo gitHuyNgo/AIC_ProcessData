@@ -310,37 +310,107 @@ Run all videos in this order. This keeps the heavy ViT-H-14 model loaded only du
 
 ### 9.1 Encode All Videos
 
-Create frame embeddings for every video:
+Create frame embeddings for every video. On a 24 GB RTX 4090, run three encode shards in parallel with batch size 384:
 
 ```bash
-python src/pipeline.py --device cuda \
-  --skip-scene-boundary \
-  --skip-clustering \
-  --skip-save-keyframes
+mkdir -p logs
+
+for i in 0 1 2; do
+  CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  nohup python src/pipeline.py --device cuda \
+    --batch-size 384 \
+    --num-shards 3 \
+    --shard-index "$i" \
+    --skip-scene-boundary \
+    --skip-clustering \
+    --skip-save-keyframes \
+    > "logs/encode_shard_${i}.log" 2>&1 &
+done
+```
+
+Watch the three encode logs:
+
+```bash
+watch -n 2 '
+echo "===== shard 0 ====="; tail -n 8 logs/encode_shard_0.log
+echo "===== shard 1 ====="; tail -n 8 logs/encode_shard_1.log
+echo "===== shard 2 ====="; tail -n 8 logs/encode_shard_2.log
+'
+```
+
+Press `Ctrl+C` to stop watching logs. The `nohup` encode jobs keep running in the background.
+
+Check GPU usage:
+
+```bash
+nvidia-smi
+```
+
+Check whether the encode jobs are still running:
+
+```bash
+jobs -l
 ```
 
 ### 9.2 Detect Scene Boundaries
 
-Run PySceneDetect for every video after embeddings are done:
+Run PySceneDetect for every video after embeddings are done. This step can also be sharded:
 
 ```bash
-python src/pipeline.py --device cuda \
-  --skip-encode \
-  --skip-clustering \
-  --skip-save-keyframes
+mkdir -p logs
+SCENE_SHARDS=3
+
+for i in $(seq 0 $((SCENE_SHARDS - 1))); do
+  nohup python src/pipeline.py --device cuda \
+    --num-shards "$SCENE_SHARDS" \
+    --shard-index "$i" \
+    --skip-encode \
+    --skip-clustering \
+    --skip-save-keyframes \
+    > "logs/scene_shard_${i}.log" 2>&1 &
+done
 ```
 
 PySceneDetect runs at full resolution by default. If you need a faster approximate run later, add `--scene-downscale 4`.
 
-### 9.3 Select Keyframe Indices
-
-Run clustering after scene boundary files exist:
+Watch scene-boundary logs:
 
 ```bash
-python src/pipeline.py --device cuda \
-  --skip-encode \
-  --skip-scene-boundary \
-  --skip-save-keyframes
+watch -n 2 '
+echo "===== scene shard 0 ====="; tail -n 8 logs/scene_shard_0.log
+echo "===== scene shard 1 ====="; tail -n 8 logs/scene_shard_1.log
+echo "===== scene shard 2 ====="; tail -n 8 logs/scene_shard_2.log
+'
+```
+
+### 9.3 Select Keyframe Indices
+
+Run clustering after scene boundary files exist. This step is light enough to run more shards:
+
+```bash
+mkdir -p logs
+CLUSTER_SHARDS=4
+
+for i in $(seq 0 $((CLUSTER_SHARDS - 1))); do
+  nohup python src/pipeline.py --device cuda \
+    --num-shards "$CLUSTER_SHARDS" \
+    --shard-index "$i" \
+    --skip-encode \
+    --skip-scene-boundary \
+    --skip-save-keyframes \
+    > "logs/cluster_shard_${i}.log" 2>&1 &
+done
+```
+
+Watch clustering logs:
+
+```bash
+watch -n 2 '
+echo "===== cluster shard 0 ====="; tail -n 8 logs/cluster_shard_0.log
+echo "===== cluster shard 1 ====="; tail -n 8 logs/cluster_shard_1.log
+echo "===== cluster shard 2 ====="; tail -n 8 logs/cluster_shard_2.log
+echo "===== cluster shard 3 ====="; tail -n 8 logs/cluster_shard_3.log
+'
 ```
 
 ### 9.4 Save Keyframes In Parallel
@@ -348,21 +418,32 @@ python src/pipeline.py --device cuda \
 The save-keyframes phase can be sharded across multiple processes because it does not load the ViT-H-14 model:
 
 ```bash
-SHARDS=4
+mkdir -p logs
+SAVE_SHARDS=4
 
-for i in $(seq 0 $((SHARDS - 1))); do
-  python src/pipeline.py --device cuda \
+for i in $(seq 0 $((SAVE_SHARDS - 1))); do
+  nohup python src/pipeline.py --device cuda \
+    --num-shards "$SAVE_SHARDS" \
+    --shard-index "$i" \
     --skip-encode \
     --skip-scene-boundary \
     --skip-clustering \
-    --num-shards "$SHARDS" \
-    --shard-index "$i" &
+    > "logs/save_keyframes_shard_${i}.log" 2>&1 &
 done
-
-wait
 ```
 
-If CPU, disk, or WebP encoding becomes overloaded, use `SHARDS=2`.
+If CPU, disk, or WebP encoding becomes overloaded, use `SAVE_SHARDS=2`. If disk is fast and CPU is idle, try `SAVE_SHARDS=6`.
+
+Watch save-keyframes logs:
+
+```bash
+watch -n 2 '
+echo "===== save shard 0 ====="; tail -n 8 logs/save_keyframes_shard_0.log
+echo "===== save shard 1 ====="; tail -n 8 logs/save_keyframes_shard_1.log
+echo "===== save shard 2 ====="; tail -n 8 logs/save_keyframes_shard_2.log
+echo "===== save shard 3 ====="; tail -n 8 logs/save_keyframes_shard_3.log
+'
+```
 
 The saved keyframes keep the original video resolution.
 
@@ -385,37 +466,70 @@ If the job is interrupted, run the same phase command again **without** `--overw
 For example, resume encode:
 
 ```bash
-python src/pipeline.py --device cuda \
-  --skip-scene-boundary \
-  --skip-clustering \
-  --skip-save-keyframes
+mkdir -p logs
+
+for i in 0 1 2; do
+  CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  nohup python src/pipeline.py --device cuda \
+    --batch-size 384 \
+    --num-shards 3 \
+    --shard-index "$i" \
+    --skip-scene-boundary \
+    --skip-clustering \
+    --skip-save-keyframes \
+    > "logs/encode_shard_${i}.log" 2>&1 &
+done
 ```
 
 Resume scene boundary:
 
 ```bash
-python src/pipeline.py --device cuda \
-  --skip-encode \
-  --skip-clustering \
-  --skip-save-keyframes
+mkdir -p logs
+SCENE_SHARDS=3
+
+for i in $(seq 0 $((SCENE_SHARDS - 1))); do
+  nohup python src/pipeline.py --device cuda \
+    --num-shards "$SCENE_SHARDS" \
+    --shard-index "$i" \
+    --skip-encode \
+    --skip-clustering \
+    --skip-save-keyframes \
+    > "logs/scene_shard_${i}.log" 2>&1 &
+done
 ```
 
 Resume clustering:
 
 ```bash
-python src/pipeline.py --device cuda \
-  --skip-encode \
-  --skip-scene-boundary \
-  --skip-save-keyframes
+mkdir -p logs
+CLUSTER_SHARDS=4
+
+for i in $(seq 0 $((CLUSTER_SHARDS - 1))); do
+  nohup python src/pipeline.py --device cuda \
+    --num-shards "$CLUSTER_SHARDS" \
+    --shard-index "$i" \
+    --skip-encode \
+    --skip-scene-boundary \
+    --skip-save-keyframes \
+    > "logs/cluster_shard_${i}.log" 2>&1 &
+done
 ```
 
 Resume save keyframes:
 
 ```bash
-python src/pipeline.py --device cuda \
-  --skip-encode \
-  --skip-scene-boundary \
-  --skip-clustering
+mkdir -p logs
+SAVE_SHARDS=4
+
+for i in $(seq 0 $((SAVE_SHARDS - 1))); do
+  nohup python src/pipeline.py --device cuda \
+    --num-shards "$SAVE_SHARDS" \
+    --shard-index "$i" \
+    --skip-encode \
+    --skip-scene-boundary \
+    --skip-clustering \
+    > "logs/save_keyframes_shard_${i}.log" 2>&1 &
+done
 ```
 
 Only use `--overwrite` when you intentionally want to regenerate existing outputs.
