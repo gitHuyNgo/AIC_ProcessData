@@ -147,6 +147,18 @@ def codec_name(video_path: Path) -> str:
     return str(probe_video(video_path).get("codec_name") or "").lower()
 
 
+def ffmpeg_has_decoder(decoder_name: str) -> bool:
+    if shutil.which("ffmpeg") is None:
+        return False
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-decoders"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode == 0 and decoder_name in proc.stdout
+
+
 def video_info_cv2(video_path: Path) -> tuple[float, int]:
     import cv2
 
@@ -205,12 +217,16 @@ def transcode_to_h264(src_path: Path, dst_path: Path) -> None:
     if shutil.which("ffmpeg") is None:
         raise RuntimeError(
             "FFmpeg executable not found. Install ffmpeg for AV1 fallback transcoding.")
+    input_args = []
+    if codec_name(src_path) == "av1" and ffmpeg_has_decoder("av1_cuvid"):
+        input_args = ["-hwaccel", "cuda", "-c:v", "av1_cuvid"]
     cmd = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "error",
         "-y",
+        *input_args,
         "-i",
         str(src_path),
         "-map",
@@ -236,6 +252,14 @@ def transcode_to_h264(src_path: Path, dst_path: Path) -> None:
 
 def detect_scene_ranges(video_path: Path, threshold: float, min_scene_len: int) -> np.ndarray:
     codec = codec_name(video_path)
+    if codec == "av1":
+        with tempfile.TemporaryDirectory(prefix="aic_av1_scene_") as tmp_dir:
+            tmp_path = Path(tmp_dir) / f"{video_path.stem}_h264.mp4"
+            print(
+                "Running PySceneDetect after temporary FFmpeg/NVDEC H.264 transcode.", flush=True)
+            transcode_to_h264(video_path, tmp_path)
+            return scene_ranges_from_video(tmp_path, threshold, min_scene_len)
+
     try:
         return scene_ranges_from_video(video_path, threshold, min_scene_len)
     except Exception as exc:
