@@ -20,6 +20,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent / \
     "video_processing" if SCRIPT_DIR.name == "final" else SCRIPT_DIR
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"}
+MAX_HIERARCHICAL_SCENE_FRAMES = 512
+LONG_SCENE_SEGMENT_SIZE = 256
 
 
 def parse_args() -> argparse.Namespace:
@@ -275,6 +277,16 @@ def process_scene(scene_boundary: np.ndarray, frame_embs: np.ndarray) -> list[in
     if len(scene_embs) < 5:
         center = scene_embs.mean(axis=0)
         return [left + int(np.argmin(((scene_embs - center[None, :]) ** 2).sum(axis=1)))]
+    if len(scene_embs) > MAX_HIERARCHICAL_SCENE_FRAMES:
+        selected = []
+        for start in range(0, len(scene_embs), LONG_SCENE_SEGMENT_SIZE):
+            segment = scene_embs[start: start + LONG_SCENE_SEGMENT_SIZE]
+            if len(segment) == 0:
+                continue
+            center = segment.mean(axis=0)
+            local_idx = int(np.argmin(((segment - center[None, :]) ** 2).sum(axis=1)))
+            selected.append(left + start + local_idx)
+        return selected
     return [left + idx for idx in hierarchical_clustering_avg(scene_embs)]
 
 
