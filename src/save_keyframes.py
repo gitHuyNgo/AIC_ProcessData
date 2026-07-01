@@ -170,6 +170,18 @@ def codec_name(video_path: Path) -> str:
     return str(probe_video(video_path).get("codec_name") or "").lower()
 
 
+def ffmpeg_has_decoder(decoder_name: str) -> bool:
+    if shutil.which("ffmpeg") is None:
+        return False
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-decoders"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode == 0 and decoder_name in proc.stdout
+
+
 def video_fps(video_path: Path) -> float:
     try:
         import cv2
@@ -300,12 +312,16 @@ def extract_frame_ffmpeg(video_path: Path, frame_idx: int, output_file: Path) ->
             "FFmpeg executable not found. Install ffmpeg for AV1 frame extraction fallback.")
     # select uses zero-based decoded frame numbers, matching OpenCV frame_idx.
     vf = f"select=eq(n\\,{int(frame_idx)})"
+    input_args = []
+    if codec_name(video_path) == "av1" and ffmpeg_has_decoder("av1_cuvid"):
+        input_args = ["-hwaccel", "cuda", "-c:v", "av1_cuvid"]
     cmd = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "error",
         "-y",
+        *input_args,
         "-i",
         str(video_path),
         "-vf",
@@ -339,6 +355,9 @@ def extract_frame_pyav(video_path: Path, frame_idx: int, output_file: Path) -> N
 
 
 def extract_frame_fallback(video_path: Path, frame_idx: int, output_file: Path) -> None:
+    if codec_name(video_path) == "av1":
+        extract_frame_ffmpeg(video_path, frame_idx, output_file)
+        return
     try:
         extract_frame_pyav(video_path, frame_idx, output_file)
     except Exception as pyav_exc:
@@ -386,11 +405,16 @@ def save_frames_ffmpeg(keyframe_indices: np.ndarray, video_path: Path, output_pa
 def save_frames(keyframe_indices_path: Path, video_path: Path, output_path: Path, output_path_map_keyframes: Path, webp_quality: int) -> None:
     output_path.mkdir(parents=True, exist_ok=True)
     keyframe_indices = load_keyframe_indices(keyframe_indices_path)
+    codec = codec_name(video_path)
+    if codec == "av1":
+        print("Saving AV1 keyframes with FFmpeg/NVDEC.", flush=True)
+        rows = save_frames_ffmpeg(keyframe_indices, video_path, output_path)
+        write_mapping(output_path_map_keyframes, rows)
+        return
     try:
         rows = save_frames_cv2(
             keyframe_indices, video_path, output_path, webp_quality)
     except Exception as exc:
-        codec = codec_name(video_path)
         print(
             f"Normal keyframe saving failed for {video_path} (codec={codec or 'unknown'}): {exc}", flush=True)
         print("Retrying keyframe extraction with FFmpeg fallback for AV1/unsupported codecs.", flush=True)
