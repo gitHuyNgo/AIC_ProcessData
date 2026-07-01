@@ -390,6 +390,49 @@ python src/pipeline.py --device cuda \
   --skip-save-keyframes
 ```
 
+### 9.7 Resume After A Stop
+
+If the job is interrupted, run the same phase command again **without** `--overwrite`. The pipeline skips files that already exist and continues with the unfinished videos.
+
+For example, resume encode:
+
+```bash
+python src/pipeline.py --device cuda \
+  --skip-scene-boundary \
+  --skip-clustering \
+  --skip-save-keyframes
+```
+
+Resume scene boundary:
+
+```bash
+python src/pipeline.py --device cuda \
+  --skip-encode \
+  --skip-clustering \
+  --skip-save-keyframes \
+  --scene-downscale 4
+```
+
+Resume clustering:
+
+```bash
+python src/pipeline.py --device cuda \
+  --skip-encode \
+  --skip-scene-boundary \
+  --skip-save-keyframes
+```
+
+Resume save keyframes:
+
+```bash
+python src/pipeline.py --device cuda \
+  --skip-encode \
+  --skip-scene-boundary \
+  --skip-clustering
+```
+
+Only use `--overwrite` when you intentionally want to regenerate existing outputs.
+
 ## 10. Output Structure
 
 After the pipeline finishes, outputs are saved to:
