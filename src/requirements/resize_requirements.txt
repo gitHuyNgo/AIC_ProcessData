@@ -1,0 +1,3 @@
+opencv-python
+hydra-core
+omegaconf
