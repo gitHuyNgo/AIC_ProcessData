@@ -10,7 +10,9 @@ for subfolder in sorted(video_root.iterdir()):
         continue
 
     videos = sorted(
-        [f.name for f in subfolder.iterdir() if f.is_file()]
+        str(f.relative_to(subfolder))
+        for f in subfolder.rglob("*.mp4")
+        if f.is_file()
     )
 
     output_file = output_root / f"files_list_{subfolder.name}.txt"
