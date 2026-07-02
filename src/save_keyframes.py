@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import os
@@ -22,6 +23,8 @@ PROJECT_ROOT = SCRIPT_DIR.parent / \
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"}
 MAX_HIERARCHICAL_SCENE_FRAMES = 512
 LONG_SCENE_SEGMENT_SIZE = 256
+WEBP_WRITE_WORKERS = 4
+MAX_PENDING_WEBP_WRITES = 8
 
 
 def parse_args() -> argparse.Namespace:
@@ -322,6 +325,35 @@ def write_mapping(output_path_map_keyframes: Path, rows: list[tuple]) -> None:
         csvwriter.writerows(rows)
 
 
+def write_webp(output_file: Path, frame: np.ndarray, webp_quality: int) -> bool:
+    import cv2
+
+    return bool(cv2.imwrite(str(output_file), frame, [cv2.IMWRITE_WEBP_QUALITY, int(webp_quality)]))
+
+
+def drain_webp_futures(
+    pending: dict[concurrent.futures.Future, tuple],
+    rows: list[tuple],
+    pbar,
+    wait_all: bool = False,
+) -> None:
+    if not pending:
+        return
+    if wait_all:
+        done = set(pending)
+    else:
+        done, _ = concurrent.futures.wait(
+            pending,
+            return_when=concurrent.futures.FIRST_COMPLETED,
+        )
+    for future in done:
+        row = pending.pop(future)
+        if not future.result():
+            raise RuntimeError(f"Could not write keyframe image: {row}")
+        rows.append(row)
+        pbar.update(1)
+
+
 def extract_frame_ffmpeg(video_path: Path, frame_idx: int, output_file: Path) -> None:
     if shutil.which("ffmpeg") is None:
         raise RuntimeError(
@@ -488,24 +520,31 @@ def save_frames_cv2(keyframe_indices: np.ndarray, video_path: Path, output_path:
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     frames_mapping = []
     current_index = -1
-    for key_frame_idx, frame_idx in tqdm(
-        list(enumerate(keyframe_indices)),
-        desc=f"Saving keyframes {video_path.name}",
-        unit="frame",
-        leave=False,
-    ):
-        frame_idx = int(frame_idx)
-        while current_index < frame_idx:
-            ret, frame = cap.read()
-            if not ret:
-                cap.release()
-                raise RuntimeError(f"Cannot read frame {frame_idx} from {video_path}")
-            current_index += 1
-        file_path = output_path / f"{key_frame_idx:06d}.webp"
-        if cv2.imwrite(str(file_path), frame, [cv2.IMWRITE_WEBP_QUALITY, int(webp_quality)]):
-            frames_mapping.append(
-                (key_frame_idx, current_index / fps if fps > 0 else "", fps, current_index))
+    pending: dict[concurrent.futures.Future, tuple] = {}
+    workers = max(1, min(WEBP_WRITE_WORKERS, os.cpu_count() or 1))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        with tqdm(
+            total=len(keyframe_indices),
+            desc=f"Saving keyframes {video_path.name}",
+            unit="frame",
+            leave=False,
+        ) as pbar:
+            for key_frame_idx, frame_idx in enumerate(keyframe_indices):
+                frame_idx = int(frame_idx)
+                while current_index < frame_idx:
+                    ret, frame = cap.read()
+                    if not ret:
+                        cap.release()
+                        raise RuntimeError(f"Cannot read frame {frame_idx} from {video_path}")
+                    current_index += 1
+                file_path = output_path / f"{key_frame_idx:06d}.webp"
+                row = (key_frame_idx, current_index / fps if fps > 0 else "", fps, current_index)
+                pending[executor.submit(write_webp, file_path, frame.copy(), webp_quality)] = row
+                if len(pending) >= MAX_PENDING_WEBP_WRITES:
+                    drain_webp_futures(pending, frames_mapping, pbar)
+            drain_webp_futures(pending, frames_mapping, pbar, wait_all=True)
     cap.release()
+    frames_mapping.sort(key=lambda row: row[0])
     return frames_mapping
 
 
@@ -549,28 +588,31 @@ def save_frames_ffmpeg_stream(keyframe_indices: np.ndarray, video_path: Path, ou
     target_pos = 0
     frames_mapping = []
     decoded_idx = -1
+    pending: dict[concurrent.futures.Future, tuple] = {}
+    workers = max(1, min(WEBP_WRITE_WORKERS, os.cpu_count() or 1))
 
-    with tqdm(total=len(keyframe_indices), desc=f"Saving keyframes {video_path.name}", unit="frame", leave=False) as pbar:
-        while target_pos < len(keyframe_indices):
-            raw = proc.stdout.read(frame_size)
-            if not raw:
-                break
-            if len(raw) != frame_size:
-                proc.kill()
-                raise RuntimeError(f"Incomplete raw frame while saving keyframes from {video_path}")
-            decoded_idx += 1
-            target_frame = int(keyframe_indices[target_pos])
-            if decoded_idx < target_frame:
-                continue
-            if decoded_idx == target_frame:
-                frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
-                output_file = output_path / f"{target_pos:06d}.webp"
-                if cv2.imwrite(str(output_file), frame, [cv2.IMWRITE_WEBP_QUALITY, int(webp_quality)]):
-                    frames_mapping.append(
-                        (target_pos, decoded_idx / fps if fps > 0 else "", fps, decoded_idx)
-                    )
-                target_pos += 1
-                pbar.update(1)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        with tqdm(total=len(keyframe_indices), desc=f"Saving keyframes {video_path.name}", unit="frame", leave=False) as pbar:
+            while target_pos < len(keyframe_indices):
+                raw = proc.stdout.read(frame_size)
+                if not raw:
+                    break
+                if len(raw) != frame_size:
+                    proc.kill()
+                    raise RuntimeError(f"Incomplete raw frame while saving keyframes from {video_path}")
+                decoded_idx += 1
+                target_frame = int(keyframe_indices[target_pos])
+                if decoded_idx < target_frame:
+                    continue
+                if decoded_idx == target_frame:
+                    frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
+                    output_file = output_path / f"{target_pos:06d}.webp"
+                    row = (target_pos, decoded_idx / fps if fps > 0 else "", fps, decoded_idx)
+                    pending[executor.submit(write_webp, output_file, frame.copy(), webp_quality)] = row
+                    target_pos += 1
+                    if len(pending) >= MAX_PENDING_WEBP_WRITES:
+                        drain_webp_futures(pending, frames_mapping, pbar)
+            drain_webp_futures(pending, frames_mapping, pbar, wait_all=True)
 
     if proc.stdout is not None:
         proc.stdout.close()
@@ -582,6 +624,7 @@ def save_frames_ffmpeg_stream(keyframe_indices: np.ndarray, video_path: Path, ou
         )
     if return_code != 0 and not frames_mapping:
         raise RuntimeError(f"FFmpeg keyframe stream failed for {video_path}: {stderr[-1000:]}")
+    frames_mapping.sort(key=lambda row: row[0])
     return frames_mapping
 
 
