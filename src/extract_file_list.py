@@ -1,7 +1,7 @@
 from pathlib import Path
 
 video_root = Path("dataraw/videos/Video")
-output_root = Path("dataraw/folder_file_list")
+output_root = Path("ProcessedData/folder_file_list")
 
 output_root.mkdir(parents=True, exist_ok=True)
 
