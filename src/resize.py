@@ -7,7 +7,7 @@ from multiprocessing import JoinableQueue, Process
 import queue
 import hydra
 from omegaconf import DictConfig
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -76,62 +76,121 @@ def resize_keyframes_worker(q: JoinableQueue, height: int, batch_size: int = 128
             continue
 
 
+_AV1_HW_DECODE_SUPPORTED: Optional[bool] = None
+
+
+def check_av1_hw_decode() -> bool:
+    global _AV1_HW_DECODE_SUPPORTED
+    if _AV1_HW_DECODE_SUPPORTED is None:
+        try:
+            cmd = ["ffmpeg", "-hide_banner", "-decoders"]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            _AV1_HW_DECODE_SUPPORTED = (
+                "av1_cuvid" in result.stdout
+                or
+                "av1_nvdec" in result.stdout
+            )
+        except Exception:
+            _AV1_HW_DECODE_SUPPORTED = False
+    return _AV1_HW_DECODE_SUPPORTED
+
+
+def get_video_codec(src_video: str) -> str:
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        src_video
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout.strip().lower()
+    except subprocess.CalledProcessError:
+        return ""
+
+
+def _run_ffmpeg(src_video: str, dst_video: str, height: int, bitrate: str, hw_decode: bool) -> bool:
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+    ]
+
+    if hw_decode:
+        cmd.extend([
+            "-hwaccel", "cuda",
+            "-hwaccel_output_format", "cuda",
+            "-i", src_video,
+            "-vf", f"scale_cuda=-2:{height}"
+        ])
+    else:
+        cmd.extend([
+            "-i", src_video,
+            "-vf", f"hwupload_cuda,scale_cuda=-2:{height}"
+        ])
+
+    cmd.extend([
+        "-c:v", "hevc_nvenc",
+        "-preset", "p3",
+        "-tune", "hq",
+        "-rc", "vbr",
+        "-cq", "22",
+        "-b:v", bitrate,
+        "-maxrate", bitrate,
+        "-bufsize", f"{int(bitrate.replace('M', '')) * 2}M",
+        "-spatial_aq", "1",
+        "-temporal_aq", "1",
+        "-rc-lookahead", "32",
+        "-surfaces", "64",
+        "-bf", "3",
+        "-b_ref_mode", "middle",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        "-y",
+        dst_video,
+    ])
+
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def encode_video_fast(src_video: str, dst_video: str, height: int, bitrate: str):
     os.makedirs(os.path.dirname(dst_video), exist_ok=True)
 
     if os.path.exists(dst_video):
         return
 
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-hwaccel",
-        "cuda",
-        "-hwaccel_output_format",
-        "cuda",
-        "-i",
-        src_video,
-        "-vf",
-        f"scale_cuda=-2:{height}",
-        "-c:v",
-        "hevc_nvenc",
-        "-preset",
-        "p3",
-        "-tune",
-        "hq",
-        "-rc",
-        "vbr",
-        "-cq",
-        "22",
-        "-b:v",
-        bitrate,
-        "-maxrate",
-        bitrate,
-        "-bufsize",
-        f"{int(bitrate.replace('M', '')) * 2}M",
-        "-spatial_aq",
-        "1",
-        "-temporal_aq",
-        "1",
-        "-rc-lookahead",
-        "32",
-        "-surfaces",
-        "64",
-        "-bf",
-        "3",
-        "-b_ref_mode",
-        "middle",
-        "-c:a",
-        "copy",
-        "-movflags",
-        "+faststart",
-        "-y",
-        dst_video,
-    ]
+    codec = get_video_codec(src_video)
+    use_gpu_decode = True
 
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if codec == "h264":
+        print("[GPU] H264 -> GPU decode")
+    elif codec == "hevc":
+        print("[GPU] HEVC -> GPU decode")
+    elif codec == "av1":
+        if check_av1_hw_decode():
+            print("[GPU] AV1 -> GPU decode")
+        else:
+            print("[CPU] AV1 -> CPU decode fallback")
+            use_gpu_decode = False
+    else:
+        print(f"[CPU] {codec.upper() if codec else 'UNKNOWN'} -> CPU decode fallback")
+        use_gpu_decode = False
+
+    success = False
+    if use_gpu_decode:
+        success = _run_ffmpeg(src_video, dst_video, height, bitrate, hw_decode=True)
+        if not success:
+            print("[Retry] GPU decode failed, retrying with CPU decode...")
+
+    if not success:
+        _run_ffmpeg(src_video, dst_video, height, bitrate, hw_decode=False)
 
 
 def encode_video_worker(q: JoinableQueue, height: int, bitrate: str):
