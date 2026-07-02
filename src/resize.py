@@ -36,6 +36,7 @@ def resize_keyframes_batch(batch: List[Tuple[str, str]], height: int):
 
         img = cv2.imread(src_path, cv2.IMREAD_UNCHANGED)
         if img is None:
+            print(f"  [Warning] cv2.imread failed to load image: {src_path}")
             continue
 
         h, w = img.shape[:2]
@@ -305,11 +306,28 @@ def main(config: DictConfig):
             video_queue.put((v_src, v_dst))
 
         for k_src, k_dst in zip(keyframes_src, keyframes_dst):
-            if os.path.isdir(k_src):
-                for img_name in sorted(os.listdir(k_src)):
+            k_src_path = Path(k_src)
+            
+            # Fallback 1: check if it exists exactly as defined in the txt
+            if not k_src_path.is_dir():
+                # Fallback 2: Maybe it doesn't have the 'video' subfolder?
+                # i.e., .../Videos_K16/video/K16_V001 -> .../Videos_K16/K16_V001
+                if k_src_path.parent.name.lower() == "video":
+                    alt_k_src = k_src_path.parent.parent / k_src_path.name
+                    if alt_k_src.is_dir():
+                        k_src_path = alt_k_src
+            
+            if k_src_path.is_dir():
+                k_src = str(k_src_path)
+                img_list = sorted(os.listdir(k_src))
+                if not img_list:
+                    print(f"  [Warning] Keyframe folder is empty: {k_src}")
+                for img_name in img_list:
                     src_path = os.path.join(k_src, img_name)
                     dst_path = os.path.join(k_dst, img_name)
                     image_queue.put((src_path, dst_path))
+            else:
+                print(f"  [Warning] Keyframe folder NOT FOUND: {k_src}")
 
         print(f"  ✓ Queued {subfolder}")
 

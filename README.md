@@ -9,7 +9,8 @@ Step 2: Install some libs
 sudo apt update
 sudo apt install ffmpeg -y
 sudo apt install unzip
-sudo -v; sudo https://rclone.org/install.sh
+sudo apt install -y curl
+curl https://rclone.org/install.sh | sudo bash
 sudo apt install tmux -y
 ```
 

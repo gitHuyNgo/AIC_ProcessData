@@ -194,7 +194,14 @@ def main(config: DictConfig):
                 vp = str(Path(subfolder_path) / base_name)
                 wav_path = str(wav_root / subfolder / f"{name_stem}.wav")
                 out_csv = str(asr_csv_root / subfolder / f"{name_stem}.csv")
-                map_csv = str(map_root / subfolder / f"{name_stem}.csv")
+                
+                map_csv_default = map_root / subfolder / f"{name_stem}.csv"
+                map_csv_nested = map_root / subfolder / "video" / f"{name_stem}.csv"
+                if map_csv_nested.exists():
+                    map_csv = str(map_csv_nested)
+                else:
+                    map_csv = str(map_csv_default)
+                    
                 out_json = str(asr_transcript_root / subfolder / f"{name_stem}.json")
                 tasks_list.append((vp, wav_path, out_csv, map_csv, out_json))
 
